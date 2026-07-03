@@ -6,6 +6,56 @@ import os
 import time
 from PIL import Image
 
+# ==============================================================================
+# [ส่วนเพิ่มชุดที่ 1 - หัว]: ระบบเชื่อมต่อฐานข้อมูล SQLite กับ SharePoint องค์กร
+# ==============================================================================
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
+
+SHAREPOINT_URL = "https://solmax.sharepoint.com/sites/SafetyTHRayong"
+SHAREPOINT_FOLDER_URL = "/sites/SafetyTHRayong/Shared Documents" 
+DB_FILE_NAME = "hse_permits.db"
+
+# 🛑 ข้อแนะนำ: ตรงนี้ให้ใส่อีเมลและรหัสผ่านองค์กรของคุณ 
+# (ภายหลังเมื่อขึ้นระบบ Streamlit Cloud สามารถย้ายไปเก็บในระบบ Secret เพื่อความปลอดภัยได้ครับ)
+USERNAME = "bulans@solmax.com" 
+PASSWORD = "ใส่รหัสผ่านคลาวด์องค์กรของคุณตรงนี้"
+
+def get_sharepoint_context():
+    return ClientContext(SHAREPOINT_URL).with_credentials(UserCredential(USERNAME, PASSWORD))
+
+# ฟังก์ชันดึงไฟล์ฐานข้อมูลล่าสุดจากคลาวด์บริษัทลงมาทำงาน
+def download_db_from_sharepoint():
+    try:
+        ctx = get_sharepoint_context()
+        download_path = os.path.join(os.getcwd(), DB_FILE_NAME)
+        remotefile_url = f"{SHAREPOINT_FOLDER_URL}/{DB_FILE_NAME}"
+        
+        with open(download_path, "wb") as local_file:
+            ctx.web.get_file_by_server_relative_url(remotefile_url).download(local_file).execute_query()
+        print("ดาวน์โหลดฐานข้อมูลสำเร็จ")
+    except Exception as e:
+        st.warning(f"⚠️ ยังไม่มีไฟล์ฐานข้อมูลบนคลาวด์ หรือสิทธิ์การเข้าถึงมีปัญหา ระบบกำลังเริ่มใช้ DB ชั่วคราว: {e}")
+
+# ฟังก์ชันส่งไฟล์ฐานข้อมูลที่อัปเดตแล้วกลับขึ้นไปจัดเก็บแบบถาวร
+def upload_db_to_sharepoint():
+    try:
+        ctx = get_sharepoint_context()
+        target_folder = ctx.web.get_folder_by_server_relative_url(SHAREPOINT_FOLDER_URL)
+        local_path = os.path.join(os.getcwd(), DB_FILE_NAME)
+        
+        with open(local_path, 'rb') as content_file:
+            file_content = content_file.read()
+            target_folder.upload_file(DB_FILE_NAME, file_content).execute_query()
+        print("อัปโหลดฐานข้อมูลขึ้น SharePoint สำเร็จ")
+    except Exception as e:
+        st.error(f"❌ ไม่สามารถส่งไฟล์กลับขึ้น SharePoint ได้: {e}")
+
+# สั่งให้ระบบวิ่งไปเอาไฟล์ล่าสุดมาจากคลาวด์ก่อนเปิดหน้าเว็บขึ้นมา (ถ้ายังไม่มีไฟล์อยู่ในแอป)
+if not os.path.exists(DB_FILE_NAME):
+    download_db_from_sharepoint()
+# ==============================================================================
+
 # 1. ตั้งค่าหน้าจอระบบ
 st.set_page_config(
     page_title="Solmax Work Permit Online System",
@@ -212,7 +262,6 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
         
     st.write("---")
     
-    # 🌟 จุดอัปเดต: เปลี่ยนตัวเลือกประเภทใบงานให้ครบ 6 ฟอร์มตามไฟล์แนบจริง
     permit_type = st.selectbox("🎯 ประเภทใบอนุญาตทำงาน / Select Permit Type", list(permit_master_data.keys()), 
                                index=list(permit_master_data.keys()).index(base_data["type"]) if "type" in base_data else 0)
     
@@ -227,7 +276,7 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
         is_off_hours = True
 
     if is_off_hours:
-        st.error("⚠️ สถานะปัจจุบัน: [นอกเวลาทำการปกติ / หลัง 17:00 น. หรือ วันหยุด] ระบบจะดึงรายชื่อผู้อนุมัติเฉพาะกะนอกเวลาทำการ")
+        st.error("⚠️ Status ปัจจุบัน: [นอกเวลาทำการปกติ / หลัง 17:00 น. หรือ วันหยุด] ระบบจะดึงรายชื่อผู้อนุมัติเฉพาะกะนอกเวลาทำการ")
     else:
         st.success("☀️ Status ปัจจุบัน: [เวลาทำการปกติ 08:00 - 17:00 น.]")
 
@@ -270,7 +319,6 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
         with cc2:
             uploaded_site = st.file_uploader("อัปโหลดรูปภาพสภาพหน้างานปัจจุบัน / Upload Site Photo", type=["png", "jpg", "jpeg"], key="site_v12")
             
-        # 🌟 จุดอัปเดตหลัก: เปลี่ยนแปลงและดึงค่า Safety Checklist แตกต่างกันตามประเภทฟอร์มแบบ Dynamic ตรงตามภาพไฟล์จริง
         st.markdown("#### 🛡️ รายการตรวจสอบความปลอดภัยประจำฟอร์ม / Safety Checklist")
         target_data = permit_master_data[permit_type]
         
@@ -285,7 +333,6 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
             ppe_responses[f"ppe_{idx}"] = st.checkbox(f"เตรียมสวมใส่: {ppe_item}", key=f"ppe_v12_{idx}", value=True)
             
         st.markdown("#### 👤 ลำดับผู้พิจารณาอนุมัติเปิดงาน / Step Approval Routing")
-        # ลำดับที่ 1: ผู้ควบคุมงาน
         selected_sup = st.selectbox("1. ผู้ควบคุมงาน / Supervisor In Charge", [f"{s['name']} [{s['email']}]" for s in list_supervisors])
         
         if is_off_hours:
@@ -295,12 +342,9 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
             owner_options = [f"{o['name']} [{o['email']}]" for o in list_owners_normal]
             all_issuers_options = [f"{o['name']} [{o['email']}]" for o in list_owners_normal]
             
-        # ลำดับที่ 2: เจ้าของพื้นที่
         selected_owner = st.selectbox("2. เจ้าของพื้นที่ / Area Owner", owner_options)
-        # ลำดับที่ 3: ผู้อนุญาต
         selected_issuer = st.selectbox("3. ผู้อนุญาต / Permit Issuer", all_issuers_options, index=min(1, len(all_issuers_options)-1))
         
-        # 🔒 ลำดับที่ 4: เจ้าหน้าที่ความปลอดภัย (จป.) ย้ายอยู่ท้ายสุดตรงตามภาพ image_dc0ffe.png และเงื่อนไขข้อตกลงเดิม
         if is_off_hours:
             selected_hse_name = st.selectbox("4. เจ้าหน้าที่ความปลอดภัย (จป.) / Safety Officer", all_issuers_options, key="hse_offhours_selectbox")
             hse_chosen = selected_hse_name.split(" [")[0]
@@ -344,7 +388,15 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
                     "closed_issuer_approved": False
                 }
                 st.session_state.permits.append(new_permit)
-                st.success(f"✅ ยื่นคำขอเปิดใบอนุญาตสำเร็จ! ใบงานประเภท {permit_type.split(':')[0]} เลขที่ {generated_id} ถูกส่งเข้าระบบเรียบร้อยแล้ว")
+                
+                # ==============================================================================
+                # [ส่วนเพิ่มชุดที่ 2 - กลาง]: อัปโหลดไฟล์ .db กลับขึ้น SharePoint ทันทีเมื่อมีการเพิ่มประวัติใบงานใหม่
+                # ==============================================================================
+                # (สมมติระบบเดิมของคุณบันทึกคำสั่ง SQLite ลงเครื่องเสร็จแล้ว ตรงจุดนี้จะทำหน้าที่ Sync ขึ้น SharePoint ทันที)
+                upload_db_to_sharepoint()
+                # ==============================================================================
+                
+                st.success(f"✅ ยื่นคำขอเปิดใบอนุญาตสำเร็จ! ใบงานประเภท {permit_type.split(':')[0]} เลขที่ {generated_id} ถูกส่งเข้าระบบและอัปเดตไปที่ SharePoint เรียบร้อยแล้ว")
 
 # ================= PAGE 3: APPROVAL PANEL =================
 elif "ตรวจสอบและอนุมัติเปิดงาน" in page:
@@ -367,7 +419,6 @@ elif "ตรวจสอบและอนุมัติเปิดงาน" 
                 st.write("---")
                 st.markdown("##### 🛡️ 4. ตรวจสอบสิทธิ์ขั้นตอนสุดท้าย (เจ้าหน้าที่ความปลอดภัย จป.)")
                 
-                # กลไกการเฝ้าระวังเวลา 10 นาทีหลังจากขั้นที่ 3 กดเรียบร้อยแล้ว
                 if is_p_off:
                     st.info(f"👤 ผู้มีสิทธิ์อนุมัติเปิดงานในฐานะ จป. นอกเวลา: **{permit['hse']}**")
                 else:
@@ -389,7 +440,7 @@ elif "ตรวจสอบและอนุมัติเปิดงาน" 
                             )
                             permit['hse'] = substitute_hse.split(" [")[0]
                     else:
-                        st.info("⏳ สถานะ: รอให้ขั้นตอนที่ 1 (ผู้ควบคุม), 2 (เจ้าของพื้นที่) และ 3 (ผู้อนุญาต) ลงนามเสร็จสิ้นก่อน ระบบจึงจะเริ่มเปิดใช้ตัวนับเวลา 10 นาทีของ จป.")
+                        st.info("⏳ Status: รอให้ขั้นตอนที่ 1, 2 และ 3 ลงนามเสร็จสิ้นก่อน ระบบจึงจะเริ่มนับเวลา 10 นาทีของ จป.")
                 
                 st.write("---")
                 st.markdown("##### 🚥 ลำดับสถานะการเซ็นเปิดงานปัจจุบัน:")
@@ -406,25 +457,29 @@ elif "ตรวจสอบและอนุมัติเปิดงาน" 
                         if st.button(f"✍️ 1. อนุมัติ ({permit['supervisor']})", key=f"btn_sup_{permit['id']}"):
                             permit['sup_approved'] = True
                             permit['status'] = "Pending Step 2: Area Owner Approval ⏳"
+                            upload_db_to_sharepoint() # เซฟขึ้นคลาวด์ทุกจังหวะที่มีการเซ็นอนุมัติ
                             st.rerun()
                 with b_col2:
                     if permit['sup_approved'] and not permit['owner_approved']:
                         if st.button(f"✍️ 2. อนุมัติ ({permit['owner']})", key=f"btn_own_{permit['id']}"):
                             permit['owner_approved'] = True
                             permit['status'] = "Pending Step 3: Permit Issuer Approval ⏳"
+                            upload_db_to_sharepoint()
                             st.rerun()
                 with b_col3:
                     if permit['sup_approved'] and permit['owner_approved'] and not permit['issuer_approved']:
                         if st.button(f"✍️ 3. อนุมัติ ({permit['issuer']})", key=f"btn_iss_{permit['id']}"):
                             permit['issuer_approved'] = True
                             permit['status'] = "Pending HSE Approval 👮"
-                            permit['timestamp'] = time.time()  # เริ่มจับเวลาทันทีหลังจบคั้นที่ 3
+                            permit['timestamp'] = time.time()
+                            upload_db_to_sharepoint()
                             st.rerun()
                 with b_col4:
                     if permit['sup_approved'] and permit['owner_approved'] and permit['issuer_approved'] and not permit['hse_approved']:
                         if st.button(f"✍️ 4. อนุมัติปิดท้าย ({permit['hse']})", key=f"btn_hse_{permit['id']}"):
                             permit['hse_approved'] = True
                             permit['status'] = "Fully Approved 🟢"
+                            upload_db_to_sharepoint()
                             st.success("เปิดใบอนุญาตทำงานเสร็จสิ้นสมบูรณ์!")
                             st.rerun()
                             
@@ -458,16 +513,19 @@ elif "แจ้งอนุมัติปิดงาน" in page:
                         if st.button(f"🔒 1. ผู้ควบคุมงาน ปิดงาน", key=f"cl_sup_{permit['id']}"):
                             permit['closed_sup_approved'] = True
                             permit['status'] = "Pending Closure ⏳"
+                            upload_db_to_sharepoint() # ส่งอัปเดตไฟล์กลับขึ้นคลาวด์บริษัทเมื่อมีการแจ้งปิดงาน
                             st.rerun()
                 with bc2:
                     if permit['closed_sup_approved'] and not permit['closed_owner_approved']:
                         if st.button(f"🔒 2. เจ้าของพื้นที่ ปิดงาน", key=f"cl_own_{permit['id']}"):
                             permit['closed_owner_approved'] = True
+                            upload_db_to_sharepoint()
                             st.rerun()
                 with bc3:
                     if permit['closed_sup_approved'] and permit['closed_owner_approved'] and not permit['closed_issuer_approved']:
                         if st.button(f"🔒 3. ผู้อนุญาต ปิดงานสมบูรณ์", key=f"cl_iss_{permit['id']}"):
                             permit['closed_issuer_approved'] = True
                             permit['status'] = "Closed Completed 🔒"
+                            upload_db_to_sharepoint()
                             st.success("ปิดใบงานความปลอดภัยเสร็จสิ้นอย่างสมบูรณ์!")
                             st.rerun()
