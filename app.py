@@ -1,16 +1,28 @@
-
 import streamlit as st
 import pandas as pd
-import sqlite3, os, json, uuid, socket, urllib.parse
+import sqlite3, os, json, uuid, socket, urllib.parse, io
 from pathlib import Path
 from datetime import datetime, date, time
 from PIL import Image
+# เรียกใช้ไลบรารีสำหรับควบคุมสิทธิ์เชื่อมต่อ SharePoint อัตโนมัติ
+from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.user_credential import UserCredential
 
 APP_TITLE = "SOLMAX Online Permit to Work"
-DB_PATH = "data/ptw_streamlit.db"
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
-Path("data").mkdir(exist_ok=True)
+
+# ==============================================================================
+# 🏢 ส่วนตั้งค่าตำแหน่งและการเข้าถึง SHAREPOINT (ดึงจากระบบ Secrets ปลอดภัย 100%)
+# ==============================================================================
+SHAREPOINT_SITE = "https://solmax.sharepoint.com/sites/SafetyTHRayong"
+SHAREPOINT_FOLDER = "Shared Documents/HSE_Permit_Central_System"
+
+# ดึงค่าผ่านระบบความปลอดภัยหลังบ้านของ Streamlit ไม่โชว์รหัสผ่านจริงบน GitHub
+SHAREPOINT_USER = st.secrets["sharepoint"]["username"]
+SHAREPOINT_PASSWORD = st.secrets["sharepoint"]["password"]
+DB_NAME = "hse_permits.db"               
+# ==============================================================================
 
 APPROVER_ROLES = ["ผู้ควบคุมงาน", "ผู้อนุญาต", "เจ้าของพื้นที่", "เจ้าหน้าที่ความปลอดภัย"]
 WORK_TYPES = ["General Work", "Hot Work", "Confined Space", "Work at Height", "Excavation", "Electrical Work", "Lifting Work", "Other"]
@@ -45,15 +57,60 @@ CUSTOM_CSS = """
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
+# 🔄 ระบบดาวน์โหลดและดึงฐานข้อมูลจริงมาจากคลาวด์ SharePoint ก่อนประมวลผล
+def download_db_from_sharepoint():
+    try:
+        ctx = ClientContext(SHAREPOINT_SITE).with_credentials(UserCredential(SHAREPOINT_USER, SHAREPOINT_PASSWORD))
+        file_url = f"{SHAREPOINT_FOLDER}/{DB_NAME}"
+        response = ctx.web.get_file_by_server_relative_url(file_url).get_content().execute_query()
+        return response.value
+    except Exception:
+        # หากเป็นระบบเริ่มต้นและยังไม่มีไฟล์ใน SharePoint จะสร้างข้อมูลจำลองบนหน่วยความจำแทน
+        return b""
 
+# 🔄 ระบบอัปโหลดเขียนทับไฟล์ฐานข้อมูลเวอร์ชันล่าสุดกลับขึ้นไปบน SharePoint อัตโนมัติ
+def upload_db_to_sharepoint(file_content):
+    try:
+        ctx = ClientContext(SHAREPOINT_SITE).with_credentials(UserCredential(SHAREPOINT_USER, SHAREPOINT_PASSWORD))
+        target_folder = ctx.web.get_folder_by_server_relative_url(SHAREPOINT_FOLDER)
+        target_folder.upload_file(DB_NAME, file_content).execute_query()
+    except Exception as e:
+        st.error(f"ไม่สามารถซิงค์บันทึกกลับไปยัง SharePoint ได้: {e}")
+
+# 🛠️ เชื่อมโยงตัวแปรฐานข้อมูล SQLite แบบเรียลไทม์ผ่าน RAM (In-Memory Database)
 def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    
+    db_bytes = download_db_from_sharepoint()
+    if db_bytes:
+        dest = sqlite3.connect(":memory:")
+        mem_db = io.BytesIO(db_bytes)
+        with open("temp_sync.db", "wb") as f:
+            f.write(mem_db.getbuffer())
+        disk_conn = sqlite3.connect("temp_sync.db")
+        disk_conn.backup(conn)
+        disk_conn.close()
+        try: os.remove("temp_sync.db")
+        except: pass
     return conn
 
+# 🔐 สั่งเซฟฐานข้อมูลทับไฟล์เก่าบน SharePoint ทันทีเมื่อมีการอัปเดตข้อมูล
+def save_and_sync_db(conn):
+    disk_backup_conn = sqlite3.connect("temp_sync_upload.db")
+    conn.backup(disk_backup_conn)
+    disk_backup_conn.close()
+    
+    with open("temp_sync_upload.db", "rb") as f:
+        file_bytes = f.read()
+    
+    upload_db_to_sharepoint(file_bytes)
+    try: os.remove("temp_sync_upload.db")
+    except: pass
 
 def init_db():
-    with db() as c:
+    conn = db()
+    with conn as c:
         c.execute("""CREATE TABLE IF NOT EXISTS permits(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_no TEXT UNIQUE,
@@ -89,8 +146,10 @@ def init_db():
             comment TEXT,
             decided_at TEXT
         )""")
-init_db()
+    save_and_sync_db(conn)
+    conn.close()
 
+init_db()
 
 def local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -103,22 +162,21 @@ def local_ip():
         s.close()
     return ip
 
-
 def base_url():
-    # ใช้ IP LAN เพื่อให้โทรศัพท์ใน Wi-Fi เดียวกันเปิดได้
     return f"http://{local_ip()}:8501"
 
-
 def next_doc_no():
+    conn = db()
     prefix = datetime.now().strftime("PTW-%Y%m-")
-    with db() as c:
+    with conn as c:
         row = c.execute("SELECT doc_no FROM permits WHERE doc_no LIKE ? ORDER BY doc_no DESC LIMIT 1", (prefix+"%",)).fetchone()
     next_no = int(row["doc_no"].split("-")[-1]) + 1 if row else 1
+    conn.close()
     return f"{prefix}{next_no:04d}"
 
-
 def recalc_status(permit_id):
-    with db() as c:
+    conn = db()
+    with conn as c:
         rows = c.execute("SELECT decision FROM approvals WHERE permit_id=?", (permit_id,)).fetchall()
         decisions = [r["decision"] for r in rows]
         if any(d == "Rejected" for d in decisions):
@@ -130,20 +188,23 @@ def recalc_status(permit_id):
         else:
             status = "Submitted"
         c.execute("UPDATE permits SET status=? WHERE id=?", (status, permit_id))
-
+    save_and_sync_db(conn)
+    conn.close()
 
 def get_permit(permit_id):
-    with db() as c:
+    conn = db()
+    with conn as c:
         p = c.execute("SELECT * FROM permits WHERE id=?", (permit_id,)).fetchone()
         a = c.execute("SELECT * FROM approvals WHERE permit_id=? ORDER BY id", (permit_id,)).fetchall()
+    conn.close()
     return p, a
 
-
 def all_permits_df():
-    with db() as c:
+    conn = db()
+    with conn as c:
         rows = c.execute("SELECT * FROM permits ORDER BY id DESC").fetchall()
+    conn.close()
     return pd.DataFrame([dict(r) for r in rows])
-
 
 def save_uploaded_photos(files, doc_no):
     saved=[]
@@ -158,7 +219,6 @@ def save_uploaded_photos(files, doc_no):
         saved.append(str(path))
     return saved
 
-
 def status_badge(status):
     cls = {
         "Approved":"status-approved", "Submitted":"status-submitted", "In Review":"status-review",
@@ -166,14 +226,11 @@ def status_badge(status):
     }.get(status, "status-submitted")
     return f"<span class='{cls}'>{status}</span>"
 
-
 def mailto_link(email, subject, body):
     return "mailto:" + urllib.parse.quote(email) + "?subject=" + urllib.parse.quote(subject) + "&body=" + urllib.parse.quote(body)
 
-
 def approval_url(token):
     return f"{base_url()}/?token={token}"
-
 
 def dashboard():
     st.markdown(f"<div class='main-title'>{APP_TITLE}</div><div class='sub'>Dashboard สำหรับติดตามใบขออนุญาตทำงานแบบ Real-time</div>", unsafe_allow_html=True)
@@ -200,7 +257,6 @@ def dashboard():
     st.subheader("รายการ Permit ล่าสุด")
     show = df[['doc_no','created_at','requester','company','area','work_type','start_datetime','end_datetime','status']].copy()
     st.dataframe(show, use_container_width=True, hide_index=True)
-
 
 def new_permit_form():
     st.markdown("## 📝 สร้างใบขออนุญาตทำงาน / New Permit to Work")
@@ -250,16 +306,20 @@ def new_permit_form():
         saved_photos = save_uploaded_photos(photos, doc_no)
         start_dt = datetime.combine(start_d, start_t).strftime('%Y-%m-%d %H:%M')
         end_dt = datetime.combine(end_d, end_t).strftime('%Y-%m-%d %H:%M')
-        with db() as c:
+        
+        conn = db()
+        with conn as c:
             cur = c.execute("""INSERT INTO permits(doc_no,created_at,requester,requester_phone,company,department,area,persons_count,work_type,work_description,tools,start_datetime,end_datetime,electrical_related,hazards,safety_checks,ppe,controls,emergency_plan,photos,status)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (doc_no,created_at,requester,requester_phone,company,department,area,persons_count,work_type,work_description,tools,start_dt,end_dt,electrical_related,json.dumps(hazards,ensure_ascii=False),json.dumps(safety_checks,ensure_ascii=False),json.dumps(ppe,ensure_ascii=False),controls,emergency_plan,json.dumps(saved_photos,ensure_ascii=False),'Submitted'))
             pid = cur.lastrowid
             for role,name,email in approvers:
                 c.execute("INSERT INTO approvals(permit_id,role,approver_name,approver_email,token) VALUES(?,?,?,?,?)", (pid,role,name,email,str(uuid.uuid4())))
-        st.success(f"สร้างคำขอ {doc_no} สำเร็จ")
+        save_and_sync_db(conn)
+        conn.close()
+        
+        st.success(f"สร้างคำขอ {doc_no} สำเร็จ พร้อมเชื่อมต่อข้อมูลคลาวด์แบบปลอดภัย")
         st.info("ไปที่เมนู 'รายละเอียด/Approval Links' เพื่อ copy ลิงก์หรือ mailto สำหรับส่งอีเมลอนุมัติ")
         st.session_state['last_pid']=pid
-
 
 def detail_and_links():
     st.markdown("## 🔗 รายละเอียด Permit / Approval Links")
@@ -305,10 +365,11 @@ def detail_and_links():
     except Exception:
         st.warning("ถ้าต้องการ QR Code ให้ติดตั้ง package: py -m pip install qrcode pillow")
 
-
 def approval_page(token):
-    with db() as c:
+    conn = db()
+    with conn as c:
         appr = c.execute("SELECT * FROM approvals WHERE token=?", (token,)).fetchone()
+    conn.close()
     if not appr:
         st.error("ลิงก์อนุมัติไม่ถูกต้อง")
         return
@@ -330,18 +391,23 @@ def approval_page(token):
     comment = st.text_area("ความคิดเห็นประกอบการอนุมัติ")
     c1,c2 = st.columns(2)
     if c1.button("อนุมัติ", type="primary"):
-        with db() as c:
+        conn = db()
+        with conn as c:
             c.execute("UPDATE approvals SET decision=?, comment=?, decided_at=? WHERE token=?", ('Approved',comment,datetime.now().strftime('%Y-%m-%d %H:%M:%S'),token))
+        save_and_sync_db(conn)
+        conn.close()
         recalc_status(appr['permit_id'])
-        st.success("บันทึกผลอนุมัติแล้ว")
+        st.success("บันทึกผลอนุมัติและอัปเดตไฟล์บนคลาวด์แล้ว")
         st.rerun()
     if c2.button("ไม่อนุมัติ"):
-        with db() as c:
+        conn = db()
+        with conn as c:
             c.execute("UPDATE approvals SET decision=?, comment=?, decided_at=? WHERE token=?", ('Rejected',comment,datetime.now().strftime('%Y-%m-%d %H:%M:%S'),token))
+        save_and_sync_db(conn)
+        conn.close()
         recalc_status(appr['permit_id'])
-        st.error("บันทึกผลไม่อนุมัติแล้ว")
+        st.error("บันทึกผลไม่อนุมัติและอัปเดตไฟล์บนคลาวด์แล้ว")
         st.rerun()
-
 
 def template_explorer():
     st.markdown("## 📄 อ่าน Excel ต้นแบบ")
@@ -361,7 +427,6 @@ def template_explorer():
         except Exception as e:
             st.error(f"อ่านไฟล์ไม่สำเร็จ: {e}")
 
-
 def export_data():
     st.markdown("## ⬇️ Export ข้อมูล")
     df=all_permits_df()
@@ -370,7 +435,6 @@ def export_data():
         return
     st.download_button("ดาวน์โหลดข้อมูล Permit เป็น CSV", df.to_csv(index=False).encode('utf-8-sig'), file_name="ptw_permits.csv", mime="text/csv")
     st.dataframe(df, use_container_width=True, hide_index=True)
-
 
 def main():
     qp = st.query_params
