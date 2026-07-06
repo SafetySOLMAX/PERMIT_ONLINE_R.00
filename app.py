@@ -17,7 +17,6 @@ SHAREPOINT_FOLDER_URL = "/sites/SafetyTHRayong/Shared Documents"
 DB_FILE_NAME = "hse_permits.db"
 
 # 🛑 ข้อแนะนำ: ตรงนี้ให้ใส่อีเมลและรหัสผ่านองค์กรของคุณ 
-# (ภายหลังเมื่อขึ้นระบบ Streamlit Cloud สามารถย้ายไปเก็บในระบบ Secret เพื่อความปลอดภัยได้ครับ)
 USERNAME = "bulans@solmax.com" 
 PASSWORD = "ใส่รหัสผ่านคลาวด์องค์กรของคุณตรงนี้"
 
@@ -94,7 +93,7 @@ st.markdown(
     """, unsafe_allow_html=True
 )
 
-# 4. โครงสร้างข้อมูลมาตรการตรวจสอบความปลอดภัยของแต่ละฟอร์ม (อิงตามไฟล์แนบทั้ง 6 ฟอร์มจริง)
+# 4. โครงสร้างข้อมูลมาตรการตรวจสอบความปลอดภัย
 permit_master_data = {
     "FM-HSE-001: ใบอนุญาตทำงานที่ก่อให้เกิดความร้อน (Hot Work Permit)": {
         "checklist": [
@@ -168,22 +167,40 @@ permit_master_data = {
     }
 }
 
-# 5. รายชื่อผู้พิจารณาอนุมัติ (สิทธิ์แต่ละบทบาท)
+# 5. รายชื่อผู้ควบคุมงาน (ครบทั้ง 16 รายชื่ออ้างอิงตามไฟล์แนบ Sheet ผู้ควบคุมงาน)
 list_supervisors = [
     {"name": "นายธนพล เดชนนท์ธนวัฒน์", "email": "dthanaphon@solmax.com"},
     {"name": "นายชัยกร ชารีแก้ว", "email": "ChaiyakornC@solmax.com"},
     {"name": "นายสัมฤทธิ์ ก้องโสตร", "email": "ksamrit@solmax.com"},
-    {"name": "นายประภาส แก้วอรสาร", "email": "praphask@solmax.com"}
+    {"name": "นายประภาส แก้วอรสาร", "email": "praphask@solmax.com"},
+    {"name": "นายไพฑูรย์ บางกุ้ง", "email": "paitoonb@solmax.com"},
+    {"name": "นายสุรรัช เสถียรุจิกานนท์", "email": "ssurarat@solmax.com"},
+    {"name": "นายมนพัทธ์ ผลกานต์ดี", "email": "Monphatp@solmax.com"},
+    {"name": "นายชาญชัย กะทิศาสตร์", "email": "Chanchaik@solmax.com"},
+    {"name": "นายพิชิตชัย นันท์ขุนทด", "email": "pichitchain@solmax.com"},
+    {"name": "นายกิตติ เรียงไข", "email": "Kittir@solmax.com"},
+    {"name": "น.ส.มนิสา กาญจณา", "email": "manisak@solmax.com"},
+    {"name": "นายนริน บุญช่วยเหลือ", "email": "narinb@solmax.com"},
+    {"name": "นายจักรพงษ์ สว่างวงศ์", "email": "jakkapongs@solmax.com"},
+    {"name": "น.ส.ณฐมน บุญมีรอด", "email": "nathamonb@solmax.com"},
+    {"name": "น.ส.ชุตินันท์ แซ่แต้", "email": "chutinuns@solmax.com"},
+    {"name": "น.ส.เนตรนภา ดำบรรพ์", "email": "netnapad@solmax.com"}
 ]
 
+# รายชื่อเจ้าของพื้นที่และผู้อนุญาต - ช่วงเวลาทำการปกติ (ครบ 9 รายชื่ออ้างอิงตามไฟล์แนบ)
 list_owners_normal = [
     {"name": "นายวิจักษณ์ ยุ่นชัย", "email": "ywichak@solmax.com"},
     {"name": "นายวีระศักดิ์ พูลเกษม", "email": "pwerasak@solmax.com"},
     {"name": "นายปรม ศรีวิสุทธิ์", "email": "paroms@solmax.com"},
     {"name": "นายสรนัย นาภรณ์", "email": "SorranaiN@solmax.com"},
-    {"name": "น.ส.บุหลัน แสนทวีสุข", "email": "bulans@solmax.com"}
+    {"name": "นางสิริพร ฉายาพรเลิศ", "email": "siripornc@solmax.com"},
+    {"name": "นายโกศล บัวลา", "email": "kosolb@solmax.com"},
+    {"name": "น.ส.บุหลัน แสนทวีสุข", "email": "bulans@solmax.com"},
+    {"name": "นายธนพล เดชนนท์ธนวัฒน์", "email": "dthanaphon@solmax.com"},
+    {"name": "นายชัยกร ชารีแก้ว", "email": "ChaiyakornC@solmax.com"}
 ]
 
+# รายชื่อเจ้าของพื้นที่และผู้อนุญาต - ช่วงนอกเวลาทำการปกติ (ครบ 4 รายชื่ออ้างอิงตามไฟล์แนบ)
 list_owners_offhours = [
     {"name": "นายสัมฤทธิ์ ก้องโสตร", "email": "ksamrit@solmax.com"},
     {"name": "นายประภาส แก้วอรสาร", "email": "praphask@solmax.com"},
@@ -271,12 +288,13 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
     
     manual_off_hours = st.checkbox("งานนี้นอกเวลาทำการปกติ หรือตรงกับวันหยุดเสาร์-อาทิตย์", key="manual_off_hours_check")
     
+    # 🔥 แก้ไข LOGIC ตรงนี้: ยึดตามการเลือกของ User เป็นหลัก ไม่โดนเวลาเครื่องคอมพิวเตอร์บังคับครอบงำ
     is_off_hours = False
-    if now.hour >= 17 or now.hour < 8 or "Night Shift" in shift_time or now.weekday() >= 5 or manual_off_hours:
+    if "Night Shift" in shift_time or manual_off_hours:
         is_off_hours = True
 
     if is_off_hours:
-        st.error("⚠️ Status ปัจจุบัน: [นอกเวลาทำการปกติ / หลัง 17:00 น. หรือ วันหยุด] ระบบจะดึงรายชื่อผู้อนุมัติเฉพาะกะนอกเวลาทำการ")
+        st.error("⚠️ Status ปัจจุบัน: [นอกเวลาทำการปกติ / กะกลางคืน หรือ วันหยุด] ระบบจะดึงรายชื่อผู้อนุมัติเฉพาะกะนอกเวลาทำการ")
     else:
         st.success("☀️ Status ปัจจุบัน: [เวลาทำการปกติ 08:00 - 17:00 น.]")
 
@@ -389,13 +407,7 @@ elif "ยื่นเปิดใบขออนุญาต" in page:
                 }
                 st.session_state.permits.append(new_permit)
                 
-                # ==============================================================================
-                # [ส่วนเพิ่มชุดที่ 2 - กลาง]: อัปโหลดไฟล์ .db กลับขึ้น SharePoint ทันทีเมื่อมีการเพิ่มประวัติใบงานใหม่
-                # ==============================================================================
-                # (สมมติระบบเดิมของคุณบันทึกคำสั่ง SQLite ลงเครื่องเสร็จแล้ว ตรงจุดนี้จะทำหน้าที่ Sync ขึ้น SharePoint ทันที)
                 upload_db_to_sharepoint()
-                # ==============================================================================
-                
                 st.success(f"✅ ยื่นคำขอเปิดใบอนุญาตสำเร็จ! ใบงานประเภท {permit_type.split(':')[0]} เลขที่ {generated_id} ถูกส่งเข้าระบบและอัปเดตไปที่ SharePoint เรียบร้อยแล้ว")
 
 # ================= PAGE 3: APPROVAL PANEL =================
@@ -457,7 +469,7 @@ elif "ตรวจสอบและอนุมัติเปิดงาน" 
                         if st.button(f"✍️ 1. อนุมัติ ({permit['supervisor']})", key=f"btn_sup_{permit['id']}"):
                             permit['sup_approved'] = True
                             permit['status'] = "Pending Step 2: Area Owner Approval ⏳"
-                            upload_db_to_sharepoint() # เซฟขึ้นคลาวด์ทุกจังหวะที่มีการเซ็นอนุมัติ
+                            upload_db_to_sharepoint() 
                             st.rerun()
                 with b_col2:
                     if permit['sup_approved'] and not permit['owner_approved']:
@@ -513,7 +525,7 @@ elif "แจ้งอนุมัติปิดงาน" in page:
                         if st.button(f"🔒 1. ผู้ควบคุมงาน ปิดงาน", key=f"cl_sup_{permit['id']}"):
                             permit['closed_sup_approved'] = True
                             permit['status'] = "Pending Closure ⏳"
-                            upload_db_to_sharepoint() # ส่งอัปเดตไฟล์กลับขึ้นคลาวด์บริษัทเมื่อมีการแจ้งปิดงาน
+                            upload_db_to_sharepoint() 
                             st.rerun()
                 with bc2:
                     if permit['closed_sup_approved'] and not permit['closed_owner_approved']:
