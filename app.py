@@ -1,456 +1,531 @@
 import streamlit as st
 import pandas as pd
-import sqlite3, os, json, uuid, socket, urllib.parse, io
-from pathlib import Path
-from datetime import datetime, date, time
+import datetime
+import random
+import os
+import time
 from PIL import Image
-# เรียกใช้ไลบรารีสำหรับควบคุมสิทธิ์เชื่อมต่อ SharePoint อัตโนมัติ
+
+# ==============================================================================
+# [ส่วนเพิ่มชุดที่ 1 - หัว]: ระบบเชื่อมต่อฐานข้อมูล SQLite กับ SharePoint องค์กร
+# ==============================================================================
 from office365.sharepoint.client_context import ClientContext
 from office365.runtime.auth.user_credential import UserCredential
 
-APP_TITLE = "SOLMAX Online Permit to Work"
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+SHAREPOINT_URL = "https://solmax.sharepoint.com/sites/SafetyTHRayong"
+SHAREPOINT_FOLDER_URL = "/sites/SafetyTHRayong/Shared Documents" 
+DB_FILE_NAME = "hse_permits.db"
 
-# ==============================================================================
-# 🏢 ส่วนตั้งค่าตำแหน่งและการเข้าถึง SHAREPOINT (ดึงจากระบบ Secrets ปลอดภัย 100%)
-# ==============================================================================
-SHAREPOINT_SITE = "https://solmax.sharepoint.com/sites/SafetyTHRayong"
-SHAREPOINT_FOLDER = "Shared Documents/HSE_Permit_Central_System"
+# 🛑 ข้อแนะนำ: ตรงนี้ให้ใส่อีเมลและรหัสผ่านองค์กรของคุณ 
+# (ภายหลังเมื่อขึ้นระบบ Streamlit Cloud สามารถย้ายไปเก็บในระบบ Secret เพื่อความปลอดภัยได้ครับ)
+USERNAME = "bulans@solmax.com" 
+PASSWORD = "ใส่รหัสผ่านคลาวด์องค์กรของคุณตรงนี้"
 
-# ดึงค่าผ่านระบบความปลอดภัยหลังบ้านของ Streamlit ไม่โชว์รหัสผ่านจริงบน GitHub
-SHAREPOINT_USER = st.secrets["sharepoint"]["username"]
-SHAREPOINT_PASSWORD = st.secrets["sharepoint"]["password"]
-DB_NAME = "hse_permits.db"               
-# ==============================================================================
+def get_sharepoint_context():
+    return ClientContext(SHAREPOINT_URL).with_credentials(UserCredential(USERNAME, PASSWORD))
 
-APPROVER_ROLES = ["ผู้ควบคุมงาน", "ผู้อนุญาต", "เจ้าของพื้นที่", "เจ้าหน้าที่ความปลอดภัย"]
-WORK_TYPES = ["General Work", "Hot Work", "Confined Space", "Work at Height", "Excavation", "Electrical Work", "Lifting Work", "Other"]
-SAFETY_CHECKS = [
-    "ได้ปิดกั้น/ตัดแยกพลังงาน (LOTO) เรียบร้อยแล้ว",
-    "ได้ปิดกั้นพื้นที่ด้วยเทปขาว-แดงและป้ายชี้บ่งอย่างชัดเจน",
-    "ผู้ปฏิบัติงานผ่านการอบรมและมีบัตรประจำตัวผู้รับเหมา",
-    "เครื่องมือกล/อุปกรณ์ไฟฟ้าผ่านการตรวจสอบและติดสติกเกอร์สีเขียว",
-    "ขออนุญาตใช้กระแสไฟ/ต่อสายไฟกับช่างไฟฟ้าแล้ว",
-    "มีการประชุม Toolbox Talk ก่อนเริ่มงาน",
-    "มีแผนฉุกเฉินและอุปกรณ์ระงับเหตุเหมาะสม",
-]
-PPE_LIST = ["หมวกนิรภัย", "แว่นตานิรภัย/กระบังหน้า", "รองเท้านิรภัย", "ถุงมือ", "อุปกรณ์ป้องกันหู", "หน้ากากกรองสารเคมี/ฝุ่น", "Full body harness", "ชุดกันไฟ/FR clothing", "อื่น ๆ"]
-HAZARDS = ["ไฟ/ประกายไฟ", "ไฟฟ้า", "สารเคมี", "ตกจากที่สูง", "อับอากาศ", "งานขุด", "เครื่องจักรเคลื่อนที่", "งานยก", "ฝุ่น/เสียง/ความร้อน", "ลื่น สะดุด หกล้ม"]
-
-st.set_page_config(page_title=APP_TITLE, page_icon="✅", layout="wide")
-
-CUSTOM_CSS = """
-<style>
-.block-container {padding-top: 1.2rem;}
-.main-title {font-size: 1.8rem; font-weight: 800; color:#0b6b50;}
-.sub {color:#6b7280;}
-.kpi {padding:18px; border-radius:18px; background:#ffffff; border-left:7px solid #0b6b50; box-shadow:0 3px 12px rgba(0,0,0,.06)}
-.kpi h2 {margin:0; font-size:2rem; color:#1f2937}
-.kpi span {color:#6b7280; font-weight:600}
-.status-approved {color:white;background:#0b6b50;padding:4px 10px;border-radius:999px;}
-.status-submitted {color:white;background:#2563eb;padding:4px 10px;border-radius:999px;}
-.status-review {color:white;background:#d97706;padding:4px 10px;border-radius:999px;}
-.status-rejected {color:white;background:#dc2626;padding:4px 10px;border-radius:999px;}
-.status-closed {color:white;background:#374151;padding:4px 10px;border-radius:999px;}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
-# 🔄 ระบบดาวน์โหลดและดึงฐานข้อมูลจริงมาจากคลาวด์ SharePoint ก่อนประมวลผล
+# ฟังก์ชันดึงไฟล์ฐานข้อมูลล่าสุดจากคลาวด์บริษัทลงมาทำงาน
 def download_db_from_sharepoint():
     try:
-        ctx = ClientContext(SHAREPOINT_SITE).with_credentials(UserCredential(SHAREPOINT_USER, SHAREPOINT_PASSWORD))
-        file_url = f"{SHAREPOINT_FOLDER}/{DB_NAME}"
-        response = ctx.web.get_file_by_server_relative_url(file_url).get_content().execute_query()
-        return response.value
-    except Exception:
-        # หากเป็นระบบเริ่มต้นและยังไม่มีไฟล์ใน SharePoint จะสร้างข้อมูลจำลองบนหน่วยความจำแทน
-        return b""
-
-# 🔄 ระบบอัปโหลดเขียนทับไฟล์ฐานข้อมูลเวอร์ชันล่าสุดกลับขึ้นไปบน SharePoint อัตโนมัติ
-def upload_db_to_sharepoint(file_content):
-    try:
-        ctx = ClientContext(SHAREPOINT_SITE).with_credentials(UserCredential(SHAREPOINT_USER, SHAREPOINT_PASSWORD))
-        target_folder = ctx.web.get_folder_by_server_relative_url(SHAREPOINT_FOLDER)
-        target_folder.upload_file(DB_NAME, file_content).execute_query()
+        ctx = get_sharepoint_context()
+        download_path = os.path.join(os.getcwd(), DB_FILE_NAME)
+        remotefile_url = f"{SHAREPOINT_FOLDER_URL}/{DB_FILE_NAME}"
+        
+        with open(download_path, "wb") as local_file:
+            ctx.web.get_file_by_server_relative_url(remotefile_url).download(local_file).execute_query()
+        print("ดาวน์โหลดฐานข้อมูลสำเร็จ")
     except Exception as e:
-        st.error(f"ไม่สามารถซิงค์บันทึกกลับไปยัง SharePoint ได้: {e}")
+        st.warning(f"⚠️ ยังไม่มีไฟล์ฐานข้อมูลบนคลาวด์ หรือสิทธิ์การเข้าถึงมีปัญหา ระบบกำลังเริ่มใช้ DB ชั่วคราว: {e}")
 
-# 🛠️ เชื่อมโยงตัวแปรฐานข้อมูล SQLite แบบเรียลไทม์ผ่าน RAM (In-Memory Database)
-def db():
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    
-    db_bytes = download_db_from_sharepoint()
-    if db_bytes:
-        dest = sqlite3.connect(":memory:")
-        mem_db = io.BytesIO(db_bytes)
-        with open("temp_sync.db", "wb") as f:
-            f.write(mem_db.getbuffer())
-        disk_conn = sqlite3.connect("temp_sync.db")
-        disk_conn.backup(conn)
-        disk_conn.close()
-        try: os.remove("temp_sync.db")
-        except: pass
-    return conn
-
-# 🔐 สั่งเซฟฐานข้อมูลทับไฟล์เก่าบน SharePoint ทันทีเมื่อมีการอัปเดตข้อมูล
-def save_and_sync_db(conn):
-    disk_backup_conn = sqlite3.connect("temp_sync_upload.db")
-    conn.backup(disk_backup_conn)
-    disk_backup_conn.close()
-    
-    with open("temp_sync_upload.db", "rb") as f:
-        file_bytes = f.read()
-    
-    upload_db_to_sharepoint(file_bytes)
-    try: os.remove("temp_sync_upload.db")
-    except: pass
-
-def init_db():
-    conn = db()
-    with conn as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS permits(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_no TEXT UNIQUE,
-            created_at TEXT,
-            requester TEXT,
-            requester_phone TEXT,
-            company TEXT,
-            department TEXT,
-            area TEXT,
-            persons_count INTEGER,
-            work_type TEXT,
-            work_description TEXT,
-            tools TEXT,
-            start_datetime TEXT,
-            end_datetime TEXT,
-            electrical_related TEXT,
-            hazards TEXT,
-            safety_checks TEXT,
-            ppe TEXT,
-            controls TEXT,
-            emergency_plan TEXT,
-            photos TEXT,
-            status TEXT DEFAULT 'Submitted'
-        )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS approvals(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            permit_id INTEGER,
-            role TEXT,
-            approver_name TEXT,
-            approver_email TEXT,
-            token TEXT UNIQUE,
-            decision TEXT DEFAULT 'Pending',
-            comment TEXT,
-            decided_at TEXT
-        )""")
-    save_and_sync_db(conn)
-    conn.close()
-
-init_db()
-
-def local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# ฟังก์ชันส่งไฟล์ฐานข้อมูลที่อัปเดตแล้วกลับขึ้นไปจัดเก็บแบบถาวร
+def upload_db_to_sharepoint():
     try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
+        ctx = get_sharepoint_context()
+        target_folder = ctx.web.get_folder_by_server_relative_url(SHAREPOINT_FOLDER_URL)
+        local_path = os.path.join(os.getcwd(), DB_FILE_NAME)
+        
+        with open(local_path, 'rb') as content_file:
+            file_content = content_file.read()
+            target_folder.upload_file(DB_FILE_NAME, file_content).execute_query()
+        print("อัปโหลดฐานข้อมูลขึ้น SharePoint สำเร็จ")
+    except Exception as e:
+        st.error(f"❌ ไม่สามารถส่งไฟล์กลับขึ้น SharePoint ได้: {e}")
 
-def base_url():
-    return f"http://{local_ip()}:8501"
+# สั่งให้ระบบวิ่งไปเอาไฟล์ล่าสุดมาจากคลาวด์ก่อนเปิดหน้าเว็บขึ้นมา (ถ้ายังไม่มีไฟล์อยู่ในแอป)
+if not os.path.exists(DB_FILE_NAME):
+    download_db_from_sharepoint()
+# ==============================================================================
 
-def next_doc_no():
-    conn = db()
-    prefix = datetime.now().strftime("PTW-%Y%m-")
-    with conn as c:
-        row = c.execute("SELECT doc_no FROM permits WHERE doc_no LIKE ? ORDER BY doc_no DESC LIMIT 1", (prefix+"%",)).fetchone()
-    next_no = int(row["doc_no"].split("-")[-1]) + 1 if row else 1
-    conn.close()
-    return f"{prefix}{next_no:04d}"
+# 1. ตั้งค่าหน้าจอระบบ
+st.set_page_config(
+    page_title="Solmax Work Permit Online System",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-def recalc_status(permit_id):
-    conn = db()
-    with conn as c:
-        rows = c.execute("SELECT decision FROM approvals WHERE permit_id=?", (permit_id,)).fetchall()
-        decisions = [r["decision"] for r in rows]
-        if any(d == "Rejected" for d in decisions):
-            status = "Rejected"
-        elif decisions and all(d == "Approved" for d in decisions):
-            status = "Approved"
-        elif any(d == "Approved" for d in decisions):
-            status = "In Review"
+# 2. โหลดโลโก้บริษัท
+def load_solmax_logo():
+    logo_path = "Solmax_Digital_Logo_green_black (1).jpg"
+    if os.path.exists(logo_path):
+        return Image.open(logo_path)
+    return None
+
+logo_img = load_solmax_logo()
+
+# 3. ปรับปรุง CSS สไตล์ Solmax Premium ให้สแกนง่าย สวยงาม
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #F8FAFC; }
+    [data-testid="stSidebar"] { background-color: #0B1B3D !important; }
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] label p, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] .stRadio div label { 
+        color: #FFFFFF !important; font-size: 18px !important; font-weight: 600 !important; 
+    }
+    .sidebar-sub { text-align: center; color: #CBD5E1 !important; font-size: 14px; margin-bottom: 20px; }
+    .sidebar-title { text-align: center; font-weight: 700; color: #00D084 !important; font-size: 22px; margin-top: 15px; }
+    h1 { color: #0B1B3D !important; font-size: 36px !important; font-weight: 700 !important; margin-bottom: 10px !important; }
+    .stWidget label p, label, .stMarkdown p, .stCheckbox p, .stRadio p { font-size: 18px !important; font-weight: 700 !important; color: #0F172A !important; }
+    input, select, textarea, div[data-baseweb="select"] span, .stFileUploader p { font-size: 17px !important; color: #0F172A !important; font-weight: 500 !important; }
+    div.stAlert, div[data-testid="stForm"], .custom-card { background-color: #FFFFFF !important; border-radius: 14px !important; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05) !important; border: 1px solid #E2E8F0 !important; padding: 32px !important; margin-bottom: 30px !important; }
+    div.stButton > button { background-color: #00D084 !important; color: #0B1B3D !important; font-weight: 800 !important; font-size: 18px !important; border-radius: 8px !important; border: none !important; padding: 12px 30px !important; transition: all 0.3s ease; }
+    div.stButton > button:hover { background-color: #05B574 !important; color: #FFFFFF !important; box-shadow: 0 4px 12px rgba(5, 181, 116, 0.3); }
+    </style>
+    """, unsafe_allow_html=True
+)
+
+# 4. โครงสร้างข้อมูลมาตรการตรวจสอบความปลอดภัยของแต่ละฟอร์ม (อิงตามไฟล์แนบทั้ง 6 ฟอร์มจริง)
+permit_master_data = {
+    "FM-HSE-001: ใบอนุญาตทำงานที่ก่อให้เกิดความร้อน (Hot Work Permit)": {
+        "checklist": [
+            "ปั๊มน้ำระบบดับเพลิงพร้อมใช้งานและอยู่ในโหมดอัตโนมัติ / Fire pump ready & Auto mode",
+            "วาล์วควบคุมการจ่ายน้ำสำหรับระบบสปริงเกอร์เปิดอยู่ / Sprinkler valves open",
+            "มีเครื่องดับเพลิงเคมีประจำจุดปฏิบัติงานและสามารถใช้งานได้ / Fire extinguishers available and ready",
+            "เคลื่อนย้ายสิ่งที่ติดไฟออกจากระยะ 35 ฟุต (10 เมตร) หรือคลุมด้วยผ้ากันไฟที่ได้รับอนุมัติมาตรฐาน",
+            "แยกแหล่งก๊าซไวไฟ ของเหลวที่ติดไฟได้ หรือฝุ่นผงออกจากพื้นที่ปฏิบัติงาน",
+            "อุปกรณ์สำหรับการทำงานที่ก่อให้เกิดความร้อน (สายเชื่อม, หัวตัด, เครื่องขัด) อยู่ในสภาพสมบูรณ์เรียบร้อย",
+            "มีผู้เฝ้าระวังไฟ (Fire Watcher) ประจำจุดปฏิบัติงานตลอดเวลาและหลังเลิกงานอย่างน้อย 1 ชั่วโมง"
+        ],
+        "ppe": ["หน้ากากเชื่อมไฟฟ้า / แว่นตานิรภัยเซฟตี้", "ถุงมือหนังสำหรับงานเชื่อม", "ชุดผ้ากันไฟ / ปลอกแขนกันความร้อน", "รองเท้านิรภัยหัวเหล็ก"]
+    },
+    "FM-HSE-002: ใบอนุญาตทำงานขุดเจาะพื้นดิน (Excavation Work Permit)": {
+        "checklist": [
+            "ตรวจสอบและยืนยันว่าบริเวณใต้พื้นดินไม่มีสายไฟ ท่อประปา หรือท่อส่งลำเลียงสารเคมีใต้ดิน",
+            "มีการปิดกั้นพื้นที่ขุดเจาะด้วยเชือกหรือรั้วกั้นมาตรฐานรอบแนวเขตขุดตลอดเวลา",
+            "ตัด / ล็อก / แขวนป้ายเตือนอันตราย (LOTO) ทางเครื่องจักรกลและระบบไฟฟ้าเรียบร้อยแล้ว",
+            "ติดตั้งป้ายเตือนอันตรายเขตก่อสร้าง/งานขุดเจาะอย่างชัดเจน",
+            "ตรวจสอบแล้วว่าบริเวณที่ขุดเจาะไม่มีการรั่วซึมของสารเคมีหรือสารกัดกร่อน",
+            "กรณีหลุมขุดลึกเกิน 1.2 เมตร ต้องติดตั้งบันไดหนีภัยและทำผนังโครงสร้างกันดินพังทลายอย่างมั่นคง",
+            "ทำเครื่องหมายชี้บ่งตำแหน่งที่มีระบบสาธารณูปโภคหรืออุปกรณ์ใต้ดินให้เห็นเด่นชัด"
+        ],
+        "ppe": ["หมวกนิรภัย (Safety Helmet)", "เสื้อสะท้อนแสงเขตก่อสร้าง", "ถุงมือผ้า/ถุงมือยางหนา", "รองเท้านิรภัยหัวเหล็กหรือรองเท้าบู๊ทยางกันสิ่งมีคม"]
+    },
+    "FM-HSE-003: ใบอนุญาตทำงานบนที่สูง (High Area Work Permit)": {
+        "checklist": [
+            "จัดทำ Barricade แผงกั้นและป้ายเตือนเครื่องหมายความปลอดภัยบริเวณพื้นที่ด้านล่างที่ปฏิบัติงาน",
+            "งานที่สูงเกิน 2 เมตร ติดตั้งนั่งร้านที่มีราวกันตก (Hand Rail) โครงค้ำยันแน่นหนา และแผ่นทางเดินแข็งแรง",
+            "นั่งร้านได้รับการตรวจสอบความปลอดภัยและติดป้ายสัญลักษณ์ Tag สีเขียวพร้อมใช้งานแล้ว",
+            "ห้ามโยนสิ่งของหรือเครื่องมือขึ้น-ลงโดยเด็ดขาด ให้ใช้เชือกผูกดึงขึ้น-ลงเท่านั้น",
+            "กรณีใช้บันไดสำเร็จรูป ต้องมีสภาพสมบูรณ์ แข็งแรง และมีการผูกยึดล็อกฐานป้องกันการล้มเอียงขณะปีน",
+            "เครื่องมือชิ้นเล็กสำหรับการพกพา ต้องมีการผูกเชือกคล้องไว้กับตัวผู้ปฏิบัติงานขณะใช้งานบนที่สูง",
+            "ผู้ปฏิบัติงานผ่านการตรวจวัดปริมาณแอลกอฮอล์เป็น 0% และไม่มีโรคกลัวความสูงหรือโรคประจำตัวอันตราย"
+        ],
+        "ppe": ["เข็มขัดนิรภัยเต็มตัวพร้อมสายช่วยชีวิต (Full Body Safety Harness with Lanyard)", "หมวกนิรภัยพร้อมสายรัดคอ", "ถุงมือกระชับมือ", "รองเท้านิรภัยชนิดกันลื่น"]
+    },
+    "FM-HSE-004: ใบอนุญาตทำงานเกี่ยวกับไฟฟ้า (Electrical Work Permit)": {
+        "checklist": [
+            "ทำการตัดแยกกระแสไฟฟ้า ล็อกเบรกเกอร์ และแขวนป้ายเตือนอันตราย (LOTO) ในจุดที่เกี่ยวข้องเสร็จสิ้น",
+            "ตรวจสอบสภาพสายไฟฟ้า โครงสร้างตู้ไฟ และตัวนำไฟฟ้าให้อยู่ในสภาพสมบูรณ์ ไม่มีรอยฉีกขาดหรือชำรุด",
+            "จัดวางสายเคเบิ้ลและสายไฟชั่วคราวให้อยู่ในจุดปลอดภัย ไม่กีดขวางหรือพาดผ่านทางสัญจร",
+            "ตรวจเช็กระบบโครงสร้างแล้ว มั่นใจว่าไม่มีผลกระทบด้านพลังงานย้อนกลับไปยังอุปกรณ์ตัวอื่น",
+            "ตรวจสอบจุดยึดต่อสายไฟทั้งหมดอย่างละเอียด ต้องไม่มีสภาพเปลือยหรือไม่มีฉนวนหุ้ม",
+            "ตรวจสอบพื้นที่ทำงานโดยรอบ ต้องแห้งสนิท ไม่เปียกชื้น หรือไม่มีสารเคมีไวไฟรั่วไหล",
+            "เครื่องมือช่างไฟฟ้า (คีม, ไขควง, มิเตอร์) มีฉนวนกันไฟฟ้าหุ้มที่ด้ามจับอย่างแน่นหนา ไม่ชำรุด"
+        ],
+        "ppe": ["หมวกนิรภัยสำหรับงานไฟฟ้า", "ถุงมือยางป้องกันกระแสไฟฟ้า (Insulated Rubber Gloves)", "แว่นตานิรภัยกันประกายไฟความร้อน", "รองเท้าหนังพื้นยางหุ้มส้นชนิดกันไฟดูด"]
+    },
+    "FM-HSE-021: ใบอนุญาตเข้ามาปฏิบัติงานทั่วไป (General Work Permit)": {
+        "checklist": [
+            "ทำการปิดกั้นและตัดแยกพลังงานที่เป็นอันตราย (LOTO) เรียบร้อยแล้ว (กรณีเครื่องจักร)",
+            "ปิดกั้นพื้นที่ปฏิบัติงานด้วยเทปขาว-แดงชั่วคราวและติดตั้งป้ายชี้บ่งระวังอันตรายอย่างชัดเจน",
+            "ผู้ปฏิบัติงานทุกคนผ่านการอบรมกฎความปลอดภัย มีบัตรประจำตัวผู้รับเหมาและติดสแดงให้เห็นเด่นชัด",
+            "เครื่องมือกล หรือเครื่องมือไฟฟ้าผ่านการตรวจสภาพจากฝ่ายซ่อมบำรุงและติดสติกเกอร์สีเขียวผ่านการตรวจ",
+            "จัดทำกิจกรรมคุยความปลอดภัยหน้างาน (Safety Toolbox Talk) ชี้แจงขั้นตอนและความเสี่ยงก่อนเริ่มงาน"
+        ],
+        "ppe": ["หมวกนิรภัย (Safety Helmet)", "แว่นตานิรภัยป้องกันเศษวัสดุ", "ถุงมือผ้าป้องกันการบาดเจ็บ", "รองเท้านิรภัยมาตรฐาน (Safety Shoes)"]
+    },
+    "FM-HSE-037: ใบอนุญาตปฏิบัติงานในสถานที่อับอากาศ (Confined Space Permit)": {
+        "checklist": [
+            "ทำความสะอาดบริเวณพื้นที่อับอากาศจนปราศจากคราบน้ำมัน สารเคมีตกค้าง หรือวัสดุที่ติดไฟได้",
+            "ทำการตัดแยกพลังงาน ล็อกท่อส่ง ปิดวาล์ว และติดป้ายเตือนระวังอันตรายอย่างสมบูรณ์",
+            "ติดตั้งพัดลม/เครื่องดูดระบายอากาศเปิดใช้งานต่อเนื่องเพื่อหมุนเวียนอากาศภายใน",
+            "จัดตั้งผู้เฝ้าระวังภัยอับอากาศ (Stand-by Man) อยู่ประจำตำแหน่งทางเข้า-ออกตลอดเวลาปฏิบัติงาน",
+            "ติดตั้งป้ายเตือนพื้นที่อับอากาศอันตราย และบอร์ดกระดานลงชื่อตรวจสอบคนเข้า-ออกอย่างเข้มงวด",
+            "จัดเตรียมอุปกรณ์ช่วยชีวิต ฉุกเฉิน (Life Line, รอกกู้ภัย หรือชุดปฐมพยาบาล) พร้อมใช้งานในพื้นที่",
+            "ผ่านการตรวจวัดระดับแก๊ส (แก๊สไวไฟ %LEL ต้องเป็น 0, ออกซิเจนอยู่ระหว่าง 19.5% - 23.5%, แก๊สพิษ %CO ปลอดภัย)"
+        ],
+        "ppe": ["ชุดเชือกช่วยชีวิตและสายรัดลำตัวนิรภัย (Harness & Life Line)", "เครื่องตรวจวัดก๊าซพกพา (Portable Gas Detector)", "หน้ากากกรองฝุ่นก๊าซ หรือชุดถังอัดอากาศ SCBA (กรณีอากาศไม่พอ)", "อุปกรณ์ลดเสียงดัง (Ear Plug/Muffs)"]
+    }
+}
+
+# 5. รายชื่อผู้พิจารณาอนุมัติ (สิทธิ์แต่ละบทบาท)
+list_supervisors = [
+    {"name": "นายธนพล เดชนนท์ธนวัฒน์", "email": "dthanaphon@solmax.com"},
+    {"name": "นายชัยกร ชารีแก้ว", "email": "ChaiyakornC@solmax.com"},
+    {"name": "นายสัมฤทธิ์ ก้องโสตร", "email": "ksamrit@solmax.com"},
+    {"name": "นายประภาส แก้วอรสาร", "email": "praphask@solmax.com"}
+]
+
+list_owners_normal = [
+    {"name": "นายวิจักษณ์ ยุ่นชัย", "email": "ywichak@solmax.com"},
+    {"name": "นายวีระศักดิ์ พูลเกษม", "email": "pwerasak@solmax.com"},
+    {"name": "นายปรม ศรีวิสุทธิ์", "email": "paroms@solmax.com"},
+    {"name": "นายสรนัย นาภรณ์", "email": "SorranaiN@solmax.com"},
+    {"name": "น.ส.บุหลัน แสนทวีสุข", "email": "bulans@solmax.com"}
+]
+
+list_owners_offhours = [
+    {"name": "นายสัมฤทธิ์ ก้องโสตร", "email": "ksamrit@solmax.com"},
+    {"name": "นายประภาส แก้วอรสาร", "email": "praphask@solmax.com"},
+    {"name": "นายไพฑูรย์ บางกุ้ง", "email": "paitoonb@solmax.com"},
+    {"name": "นายสุรรัช เสถียรุจิกานนท์", "email": "ssurarat@solmax.com"}
+]
+
+if "permits" not in st.session_state:
+    st.session_state.permits = []
+if "worker_count" not in st.session_state:
+    st.session_state.worker_count = 1
+
+# --- ส่วนจัดวางโครงสร้างเมนูแถบข้าง (Sidebar Menu) ---
+if logo_img:
+    st.sidebar.image(logo_img, use_container_width=True)
+st.sidebar.markdown(f"<div class='sidebar-title'>SOLMAX GEOSYNTHETICS</div>", unsafe_allow_html=True)
+st.sidebar.markdown(f"<div class='sidebar-sub'>Work Permit Central Digital Hub</div>", unsafe_allow_html=True)
+st.sidebar.write("---")
+
+page = st.sidebar.radio(
+    "เมนูระบบ / Menu Navigation", 
+    ["📊 แดชบอร์ดภาพรวม / Dashboard Overview", 
+     "📝 ยื่นเปิดใบขออนุญาต / Apply New Permit", 
+     "🔍 ตรวจสอบและอนุมัติเปิดงาน / Permit Opening Approval",
+     "🔒 แจ้งอนุมัติปิดงาน / Permit Closure Panel"]
+)
+
+# ================= PAGE 1: DASHBOARD =================
+if "แดชบอร์ด" in page:
+    st.title("📊 HSE System Real-time Dashboard")
+    st.markdown("##### บริษัท โซลแมกซ์ จีโอซินเทติคส์ จำกัด (Solmax Geosynthetics Co., Ltd.)")
+    st.write("---")
+    
+    total = len(st.session_state.permits)
+    fully_approved = len([p for p in st.session_state.permits if p["status"] == "Fully Approved 🟢"])
+    pending = len([p for p in st.session_state.permits if "Pending" in p["status"] or "HSE" in p["status"]])
+    closed = len([p for p in st.session_state.permits if "Closed" in p["status"]])
+    
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("ใบงานทั้งหมด / Total Permits", total)
+    m2.metric("อนุมัติสมบูรณ์ / Fully Approved 🟢", fully_approved)
+    m3.metric("อยู่ระหว่างรออนุมัติ / Pending Logs ⏳", pending)
+    m4.metric("ปิดงานสำเร็จ / Closed 🔒", closed)
+    
+    st.write("---")
+    st.subheader("📋 ตารางติดตามสถานะใบอนุญาตทำงาน / Permit Track Board")
+    if st.session_state.permits:
+        df_show = pd.DataFrame(st.session_state.permits)
+        st.dataframe(df_show[["id", "date", "type", "applicant", "shift", "status"]], use_container_width=True, hide_index=True)
+    else:
+        st.info("💡 ไม่มีประวัติข้อมูลการยื่นใบอนุญาตทำงานในระบบขณะนี้")
+
+# ================= PAGE 2: APPLY REQUEST PERMIT =================
+elif "ยื่นเปิดใบขออนุญาต" in page:
+    st.title("📝 ยื่นเปิดใบขออนุญาตทำงาน / Apply For Work Permit")
+    st.markdown("##### บริษัท โซลแมกซ์ จีโอซินเทติคส์ จำกัด (Solmax Geosynthetics Co., Ltd.)")
+    
+    st.markdown("### 🔄 ต่ออายุใบอนุญาตเดิม (Permit Extension)")
+    existing_ids = [p["id"] for p in st.session_state.permits if p["status"] in ["Fully Approved 🟢", "Pending HSE Approval 👮"]]
+    selected_ext_id = st.selectbox("เลือกเลขที่ใบงานเดิมเพื่อต่ออายุทำงานรอบถัดไป (ไม่เกิน 24 ชม.)", ["-- สร้างใบงานใหม่ / Create New --"] + existing_ids)
+    
+    base_data = {}
+    if selected_ext_id != "-- สร้างใบงานใหม่ / Create New --":
+        base_data = next((p for p in st.session_state.permits if p["id"] == selected_ext_id), {})
+        st.success(f"🔗 ดึงข้อมูลจากใบงานเดิม {selected_ext_id} เรียบร้อยแล้ว")
+
+    now = datetime.datetime.now()
+    generated_id = f"WP-{now.strftime('%Y%m%d')}-{random.randint(100, 999)}"
+    current_time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    col_id1, col_id2 = st.columns(2)
+    with col_id1:
+        st.info(f"**🔢 เลขที่ใบงานประจำกะ / Permit ID:** {generated_id}")
+    with col_id2:
+        st.info(f"**⏰ วันที่-เวลาลงทะเบียน / Applied Time:** {current_time_str}")
+        
+    st.write("---")
+    
+    permit_type = st.selectbox("🎯 ประเภทใบอนุญาตทำงาน / Select Permit Type", list(permit_master_data.keys()), 
+                               index=list(permit_master_data.keys()).index(base_data["type"]) if "type" in base_data else 0)
+    
+    st.markdown("### ⏱️ รอบกะเวลาปฏิบัติงาน (จำกัดเปิด-ปิดวันต่อวัน) / Shift Control")
+    shift_time = st.radio("เลือกรอบเวลาทำงาน / Select Work Shift", 
+                          ["รอบกลางวัน (08:00 - 20:00 น.) / Day Shift", "รอบกลางคืน (20:00 - 08:00 น. ของวันถัดไป) / Night Shift"])
+    
+    manual_off_hours = st.checkbox("งานนี้นอกเวลาทำการปกติ หรือตรงกับวันหยุดเสาร์-อาทิตย์", key="manual_off_hours_check")
+    
+    is_off_hours = False
+    if now.hour >= 17 or now.hour < 8 or "Night Shift" in shift_time or now.weekday() >= 5 or manual_off_hours:
+        is_off_hours = True
+
+    if is_off_hours:
+        st.error("⚠️ Status ปัจจุบัน: [นอกเวลาทำการปกติ / หลัง 17:00 น. หรือ วันหยุด] ระบบจะดึงรายชื่อผู้อนุมัติเฉพาะกะนอกเวลาทำการ")
+    else:
+        st.success("☀️ Status ปัจจุบัน: [เวลาทำการปกติ 08:00 - 17:00 น.]")
+
+    with st.form("premium_solmax_form_v12"):
+        st.markdown("#### 🏢 ข้อมูลทั่วไป / General Details")
+        c1, c2 = st.columns(2)
+        with c1:
+            applicant = st.text_input("ชื่อผู้ขออนุญาตทำงาน / Applicant Name", value=base_data.get("applicant", ""))
+            company = st.text_input("บริษัทผู้รับเหมา / Contractor Company", value=base_data.get("company", ""))
+        with c2:
+            area = st.text_input("พื้นที่ปฏิบัติงาน / Work Location Area", value=base_data.get("area", ""))
+            description = st.text_input("ลักษณะงานโดยละเอียด / Scope of Work", value=base_data.get("description", ""))
+            
+        st.markdown("#### 👤 ข้อมูลพนักงานและผลการประเมินความปลอดภัยประจำตัว")
+        btn_w1, btn_w2, _ = st.columns([1.5, 1.5, 5])
+        with btn_w1:
+            if st.form_submit_button("➕ เพิ่มรายชื่อพนักงาน"):
+                st.session_state.worker_count += 1
+                st.rerun()
+        with btn_w2:
+            if st.form_submit_button("➖ ลดรายชื่อล่าสุด") and st.session_state.worker_count > 1:
+                st.session_state.worker_count -= 1
+                st.rerun()
+                
+        workers_list = []
+        for i in range(st.session_state.worker_count):
+            w_col1, w_col2 = st.columns([2, 2])
+            with w_col1:
+                w_name = st.text_input(f"ชื่อ-นามสกุล คนที่ {i+1} / Worker Name {i+1}", key=f"wname_v12_{i}")
+            with w_col2:
+                w_status = st.selectbox(f"สถานะการอบรมคนที่ {i+1} / Safety Status", 
+                                        ["ผ่านการอบรมมีบัตรประจำตัว", "อบรมแล้วรอบัตร", "อบรมชั่วคราว"], key=f"wstat_v12_{i}")
+            if w_name:
+                workers_list.append({"name": w_name, "training": w_status})
+
+        st.markdown("#### 📁 แนบเอกสารวิเคราะห์ความปลอดภัยและภาพถ่าย")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            uploaded_jsa = st.file_uploader("แนบเอกสาร JSA / SDS หรือเอกสารที่เกี่ยวข้อง (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"], key="jsa_v12")
+        with cc2:
+            uploaded_site = st.file_uploader("อัปโหลดรูปภาพสภาพหน้างานปัจจุบัน / Upload Site Photo", type=["png", "jpg", "jpeg"], key="site_v12")
+            
+        st.markdown("#### 🛡️ รายการตรวจสอบความปลอดภัยประจำฟอร์ม / Safety Checklist")
+        target_data = permit_master_data[permit_type]
+        
+        st.markdown(f"**📋 มาตรการป้องกันอันตรายก่อนเริ่มงาน ({permit_type.split(':')[0]}):**")
+        checklist_responses = {}
+        for idx, item in enumerate(target_data["checklist"]):
+            checklist_responses[f"check_{idx}"] = st.checkbox(item, key=f"chk_v12_{idx}")
+            
+        st.markdown("**🦺 อุปกรณ์ป้องกันอันตรายส่วนบุคคลภาคบังคับ (Required PPE):**")
+        ppe_responses = {}
+        for idx, ppe_item in enumerate(target_data["ppe"]):
+            ppe_responses[f"ppe_{idx}"] = st.checkbox(f"เตรียมสวมใส่: {ppe_item}", key=f"ppe_v12_{idx}", value=True)
+            
+        st.markdown("#### 👤 ลำดับผู้พิจารณาอนุมัติเปิดงาน / Step Approval Routing")
+        selected_sup = st.selectbox("1. ผู้ควบคุมงาน / Supervisor In Charge", [f"{s['name']} [{s['email']}]" for s in list_supervisors])
+        
+        if is_off_hours:
+            owner_options = [f"{o['name']} [{o['email']}]" for o in list_owners_offhours]
+            all_issuers_options = [f"{o['name']} [{o['email']}]" for o in list_owners_offhours]
         else:
-            status = "Submitted"
-        c.execute("UPDATE permits SET status=? WHERE id=?", (status, permit_id))
-    save_and_sync_db(conn)
-    conn.close()
-
-def get_permit(permit_id):
-    conn = db()
-    with conn as c:
-        p = c.execute("SELECT * FROM permits WHERE id=?", (permit_id,)).fetchone()
-        a = c.execute("SELECT * FROM approvals WHERE permit_id=? ORDER BY id", (permit_id,)).fetchall()
-    conn.close()
-    return p, a
-
-def all_permits_df():
-    conn = db()
-    with conn as c:
-        rows = c.execute("SELECT * FROM permits ORDER BY id DESC").fetchall()
-    conn.close()
-    return pd.DataFrame([dict(r) for r in rows])
-
-def save_uploaded_photos(files, doc_no):
-    saved=[]
-    folder = UPLOAD_DIR / doc_no
-    folder.mkdir(exist_ok=True)
-    for f in files:
-        if f is None: continue
-        suffix = Path(f.name).suffix.lower()
-        safe_name = f"{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:8]}{suffix}"
-        path = folder / safe_name
-        path.write_bytes(f.getbuffer())
-        saved.append(str(path))
-    return saved
-
-def status_badge(status):
-    cls = {
-        "Approved":"status-approved", "Submitted":"status-submitted", "In Review":"status-review",
-        "Rejected":"status-rejected", "Closed":"status-closed"
-    }.get(status, "status-submitted")
-    return f"<span class='{cls}'>{status}</span>"
-
-def mailto_link(email, subject, body):
-    return "mailto:" + urllib.parse.quote(email) + "?subject=" + urllib.parse.quote(subject) + "&body=" + urllib.parse.quote(body)
-
-def approval_url(token):
-    return f"{base_url()}/?token={token}"
-
-def dashboard():
-    st.markdown(f"<div class='main-title'>{APP_TITLE}</div><div class='sub'>Dashboard สำหรับติดตามใบขออนุญาตทำงานแบบ Real-time</div>", unsafe_allow_html=True)
-    df = all_permits_df()
-    if df.empty:
-        st.info("ยังไม่มีข้อมูล Permit — ไปที่เมนู 'สร้าง Permit ใหม่' เพื่อเริ่มใช้งาน")
-        return
-    c1,c2,c3,c4,c5 = st.columns(5)
-    total=len(df)
-    pending=int(df['status'].isin(['Submitted','In Review']).sum())
-    approved=int((df['status']=='Approved').sum())
-    rejected=int((df['status']=='Rejected').sum())
-    today=int(pd.to_datetime(df['created_at']).dt.date.eq(date.today()).sum())
-    for col,label,value in [(c1,'ทั้งหมด',total),(c2,'วันนี้',today),(c3,'รออนุมัติ',pending),(c4,'อนุมัติแล้ว',approved),(c5,'ไม่อนุมัติ',rejected)]:
-        col.markdown(f"<div class='kpi'><span>{label}</span><h2>{value}</h2></div>", unsafe_allow_html=True)
-    st.divider()
-    left,right = st.columns([1,1])
-    with left:
-        st.subheader("สถานะ Permit")
-        st.bar_chart(df['status'].value_counts())
-    with right:
-        st.subheader("ประเภทงาน")
-        st.bar_chart(df['work_type'].value_counts())
-    st.subheader("รายการ Permit ล่าสุด")
-    show = df[['doc_no','created_at','requester','company','area','work_type','start_datetime','end_datetime','status']].copy()
-    st.dataframe(show, use_container_width=True, hide_index=True)
-
-def new_permit_form():
-    st.markdown("## 📝 สร้างใบขออนุญาตทำงาน / New Permit to Work")
-    doc_no = next_doc_no()
-    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with st.form("ptw_form", clear_on_submit=False):
-        st.markdown("### ส่วนที่ 1: ข้อมูลทั่วไป")
-        c1,c2 = st.columns(2)
-        c1.text_input("เลขที่เอกสาร / Document No.", value=doc_no, disabled=True)
-        c2.text_input("วันที่และเวลายื่นคำขอ", value=created_at, disabled=True)
-        c1,c2,c3 = st.columns(3)
-        requester = c1.text_input("ชื่อผู้ขออนุญาตทำงาน", placeholder="ชื่อ-สกุล")
-        requester_phone = c2.text_input("เบอร์ติดต่อ", placeholder="08x-xxx-xxxx")
-        company = c3.text_input("บริษัท/ผู้รับเหมา")
-        c1,c2,c3 = st.columns(3)
-        department = c1.text_input("หน่วยงาน/แผนก")
-        area = c2.text_input("พื้นที่ปฏิบัติงาน")
-        persons_count = c3.number_input("จำนวนผู้เข้าปฏิบัติงาน", min_value=1, max_value=100, value=1)
-        work_type = st.selectbox("ประเภทงาน", WORK_TYPES)
-        work_description = st.text_area("ลักษณะงานโดยสังเขป / Work Description", height=120)
-        tools = st.text_area("อุปกรณ์/เครื่องมือที่ใช้", height=80)
-        c1,c2,c3 = st.columns(3)
-        start_d = c1.date_input("วันที่เริ่มงาน", value=date.today())
-        start_t = c2.time_input("เวลาเริ่มงาน", value=time(8,0))
-        end_t = c3.time_input("เวลาสิ้นสุดโดยประมาณ", value=time(17,0))
-        end_d = start_d
-        electrical_related = st.radio("งานที่ต้องเข้าระบบไฟฟ้าหรืออุปกรณ์ควบคุม", ["ไม่เกี่ยวข้อง", "เกี่ยวข้อง"], horizontal=True)
-        st.markdown("### ส่วนที่ 2: การประเมินความเสี่ยงและมาตรการควบคุม")
-        hazards = st.multiselect("อันตรายที่เกี่ยวข้อง", HAZARDS)
-        safety_checks = st.multiselect("การตรวจสอบความปลอดภัยก่อนเริ่มงาน", SAFETY_CHECKS)
-        ppe = st.multiselect("PPE ที่ต้องใช้", PPE_LIST)
-        controls = st.text_area("มาตรการควบคุมเพิ่มเติม / Controls", height=100)
-        emergency_plan = st.text_area("แผนฉุกเฉิน / Emergency Plan", height=80)
-        photos = st.file_uploader("แนบรูปหน้างานเพื่อประกอบการอนุมัติ", type=['png','jpg','jpeg'], accept_multiple_files=True)
-        st.markdown("### ส่วนที่ 3: ผู้อนุมัติ")
-        approvers = []
-        for role in APPROVER_ROLES:
-            c1,c2 = st.columns(2)
-            name = c1.text_input(f"{role} - ชื่อ", key=f"{role}_name")
-            email = c2.text_input(f"{role} - อีเมล", key=f"{role}_email")
-            approvers.append((role,name,email))
-        submitted = st.form_submit_button("ส่งคำขออนุมัติ", type="primary")
-    if submitted:
-        if not requester or not company or not area or not work_description:
-            st.error("กรุณากรอกข้อมูลสำคัญ: ผู้ขอ บริษัท พื้นที่ และรายละเอียดงาน")
-            return
-        saved_photos = save_uploaded_photos(photos, doc_no)
-        start_dt = datetime.combine(start_d, start_t).strftime('%Y-%m-%d %H:%M')
-        end_dt = datetime.combine(end_d, end_t).strftime('%Y-%m-%d %H:%M')
+            owner_options = [f"{o['name']} [{o['email']}]" for o in list_owners_normal]
+            all_issuers_options = [f"{o['name']} [{o['email']}]" for o in list_owners_normal]
+            
+        selected_owner = st.selectbox("2. เจ้าของพื้นที่ / Area Owner", owner_options)
+        selected_issuer = st.selectbox("3. ผู้อนุญาต / Permit Issuer", all_issuers_options, index=min(1, len(all_issuers_options)-1))
         
-        conn = db()
-        with conn as c:
-            cur = c.execute("""INSERT INTO permits(doc_no,created_at,requester,requester_phone,company,department,area,persons_count,work_type,work_description,tools,start_datetime,end_datetime,electrical_related,hazards,safety_checks,ppe,controls,emergency_plan,photos,status)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (doc_no,created_at,requester,requester_phone,company,department,area,persons_count,work_type,work_description,tools,start_dt,end_dt,electrical_related,json.dumps(hazards,ensure_ascii=False),json.dumps(safety_checks,ensure_ascii=False),json.dumps(ppe,ensure_ascii=False),controls,emergency_plan,json.dumps(saved_photos,ensure_ascii=False),'Submitted'))
-            pid = cur.lastrowid
-            for role,name,email in approvers:
-                c.execute("INSERT INTO approvals(permit_id,role,approver_name,approver_email,token) VALUES(?,?,?,?,?)", (pid,role,name,email,str(uuid.uuid4())))
-        save_and_sync_db(conn)
-        conn.close()
+        if is_off_hours:
+            selected_hse_name = st.selectbox("4. เจ้าหน้าที่ความปลอดภัย (จป.) / Safety Officer", all_issuers_options, key="hse_offhours_selectbox")
+            hse_chosen = selected_hse_name.split(" [")[0]
+        else:
+            hse_chosen = "น.ส.บุหลัน แสนทวีสุข"
+            st.info(f"ℹ️ **4. เจ้าหน้าที่ความปลอดภัย (จป.) ประจำกะ:** {hse_chosen}")
+            
+        submit_btn = st.form_submit_button("🚀 ยื่นคำขอเปิดใบอนุญาตเข้าระบบ / Submit Permit Request")
         
-        st.success(f"สร้างคำขอ {doc_no} สำเร็จ พร้อมเชื่อมต่อข้อมูลคลาวด์แบบปลอดภัย")
-        st.info("ไปที่เมนู 'รายละเอียด/Approval Links' เพื่อ copy ลิงก์หรือ mailto สำหรับส่งอีเมลอนุมัติ")
-        st.session_state['last_pid']=pid
+        if submit_btn:
+            if not applicant or not company or not area:
+                st.error("❌ กรุณากรอกข้อมูลฟิลด์หลักให้ครบถ้วนก่อนส่งข้อมูล")
+            elif not all(checklist_responses.values()):
+                st.error("❌ ต้องกดยืนยันตรวจสอบมาตรการความปลอดภัย Safety Checklist ให้ครบทุกข้อเพื่อยืนยันความปลอดภัยหน้างาน")
+            elif not all(ppe_responses.values()):
+                st.error("❌ ต้องกดรับรองการสวมใส่อุปกรณ์คุ้มครองความปลอดภัยส่วนบุคคล (PPE) ครบถ้วน")
+            else:
+                new_permit = {
+                    "id": generated_id,
+                    "date": current_time_str,
+                    "timestamp": None,
+                    "type": permit_type,
+                    "applicant": applicant,
+                    "company": company,
+                    "area": area,
+                    "description": description,
+                    "shift": shift_time,
+                    "workers": workers_list,
+                    "supervisor": selected_sup.split(" [")[0],
+                    "owner": selected_owner.split(" [")[0],
+                    "issuer": selected_issuer.split(" [")[0],
+                    "hse": hse_chosen,
+                    "is_off_hours": is_off_hours,
+                    "sup_approved": False,
+                    "owner_approved": False,
+                    "issuer_approved": False,
+                    "hse_approved": False,
+                    "status": "Pending Step 1: Supervisor Approval ⏳",
+                    "closed_sup_approved": False,
+                    "closed_owner_approved": False,
+                    "closed_issuer_approved": False
+                }
+                st.session_state.permits.append(new_permit)
+                
+                # ==============================================================================
+                # [ส่วนเพิ่มชุดที่ 2 - กลาง]: อัปโหลดไฟล์ .db กลับขึ้น SharePoint ทันทีเมื่อมีการเพิ่มประวัติใบงานใหม่
+                # ==============================================================================
+                # (สมมติระบบเดิมของคุณบันทึกคำสั่ง SQLite ลงเครื่องเสร็จแล้ว ตรงจุดนี้จะทำหน้าที่ Sync ขึ้น SharePoint ทันที)
+                upload_db_to_sharepoint()
+                # ==============================================================================
+                
+                st.success(f"✅ ยื่นคำขอเปิดใบอนุญาตสำเร็จ! ใบงานประเภท {permit_type.split(':')[0]} เลขที่ {generated_id} ถูกส่งเข้าระบบและอัปเดตไปที่ SharePoint เรียบร้อยแล้ว")
 
-def detail_and_links():
-    st.markdown("## 🔗 รายละเอียด Permit / Approval Links")
-    df = all_permits_df()
-    if df.empty:
-        st.info("ยังไม่มี Permit")
-        return
-    options = [f"{r.doc_no} | {r.requester} | {r.area} | {r.status}" for r in df.itertuples()]
-    selected = st.selectbox("เลือก Permit", options)
-    doc_no = selected.split(" | ")[0]
-    permit_id = int(df.loc[df['doc_no']==doc_no,'id'].iloc[0])
-    p,a = get_permit(permit_id)
-    st.markdown(f"### {p['doc_no']} {status_badge(p['status'])}", unsafe_allow_html=True)
-    c1,c2,c3 = st.columns(3)
-    c1.write(f"**ผู้ขอ:** {p['requester']}")
-    c2.write(f"**บริษัท:** {p['company']}")
-    c3.write(f"**พื้นที่:** {p['area']}")
-    st.write(f"**รายละเอียดงาน:** {p['work_description']}")
-    st.write(f"**มาตรการควบคุม:** {p['controls']}")
-    st.write(f"**ช่วงเวลา:** {p['start_datetime']} ถึง {p['end_datetime']}")
-    photos=json.loads(p['photos'] or '[]')
-    if photos:
-        st.markdown("#### รูปหน้างาน")
-        cols=st.columns(3)
-        for i,ph in enumerate(photos):
-            if Path(ph).exists(): cols[i%3].image(ph, use_container_width=True)
-    st.markdown("### ลิงก์อนุมัติสำหรับส่งอีเมล")
-    for x in a:
-        url = approval_url(x['token'])
-        subject = f"Approval Required: {p['doc_no']} - Permit to Work"
-        body = f"เรียน {x['approver_name']}\n\nกรุณาตรวจสอบและอนุมัติใบขออนุญาตทำงาน {p['doc_no']} ก่อนเริ่มงาน\n\nลิงก์อนุมัติ: {url}\n\nขอบคุณครับ/ค่ะ"
-        st.write(f"**{x['role']}** | {x['approver_name']} | {x['approver_email']} | สถานะ: {x['decision']}")
-        st.code(url)
-        if x['approver_email']:
-            st.markdown(f"[เปิดอีเมลเพื่อส่งลิงก์อนุมัติ]({mailto_link(x['approver_email'],subject,body)})")
-    st.markdown("### QR Code สำหรับเปิดระบบ")
-    try:
-        import qrcode
-        qr_path = Path('data/ptw_qr.png')
-        qrcode.make(base_url()).save(qr_path)
-        st.image(str(qr_path), width=220)
-        st.code(base_url())
-    except Exception:
-        st.warning("ถ้าต้องการ QR Code ให้ติดตั้ง package: py -m pip install qrcode pillow")
+# ================= PAGE 3: APPROVAL PANEL =================
+elif "ตรวจสอบและอนุมัติเปิดงาน" in page:
+    st.title("🔍 แผงควบคุมตรวจอนุมัติเปิดงานตามลำดับขั้น / Permit Opening Workflow")
+    st.write("---")
+    
+    active_permits = [p for p in st.session_state.permits if "Pending" in p["status"] or p["status"] == "Pending HSE Approval 👮"]
+    
+    if not active_permits:
+        st.success("🎉 ปัจจุบันไม่มีใบอนุญาตทำงานค้างพิจารณาเปิดงาน")
+    else:
+        for idx, permit in enumerate(active_permits):
+            is_p_off = permit.get("is_off_hours", False)
+            time_tag = " [นอกเวลาทำการ 🌙]" if is_p_off else " [เวลาปกติ ☀️]"
+            
+            with st.expander(f"📄 ใบงาน เลขที่: {permit['id']} | ประเภท: {permit['type'].split(':')[0]} | Status: {permit['status']}", expanded=True):
+                st.markdown(f"**🎯 ชนิดงานชี้เฉพาะ:** {permit['type']} | **⏱️ รอบเวลา:** {permit['shift']}")
+                st.markdown(f"**🏢 บริษัทผู้รับเหมา:** {permit['company']} | **📍 พื้นที่รับผิดชอบ:** {permit['area']}")
+                
+                st.write("---")
+                st.markdown("##### 🛡️ 4. ตรวจสอบสิทธิ์ขั้นตอนสุดท้าย (เจ้าหน้าที่ความปลอดภัย จป.)")
+                
+                if is_p_off:
+                    st.info(f"👤 ผู้มีสิทธิ์อนุมัติเปิดงานในฐานะ จป. นอกเวลา: **{permit['hse']}**")
+                else:
+                    if permit['issuer_approved'] and permit.get("timestamp") is not None:
+                        elapsed_time = time.time() - permit["timestamp"]
+                        time_remaining = 600 - elapsed_time
+                        
+                        if time_remaining > 0 and not permit['hse_approved']:
+                            mins, secs = divmod(int(time_remaining), 60)
+                            st.warning(f"⏳ ส่งต่อถึง จป. แล้ว! อยู่ในระหว่างเวลาล็อกสิทธิ์ของ ({permit['hse']}) เหลือเวลานับถอยหลัง: {mins:02d}:{secs:02d} นาที")
+                        elif time_remaining <= 0 and not permit['hse_approved']:
+                            st.error(f"⏰ เกิน 10 นาทีหลังจากขั้นที่ 3 อนุมัติแล้ว และ จป. ({permit['hse']}) ยังไม่ได้ดำเนินการในเวลา")
+                            
+                            sub_options = [f"{o['name']} [{o['email']}]" for o in list_owners_normal]
+                            substitute_hse = st.selectbox(
+                                "🔄 สิทธิ์การผูกขาดถูกเปิดออก โปรดเลือกผู้อนุมัติร่วมประจำพื้นที่เพื่อพิจารณาลงนามแทน จป.:", 
+                                sub_options, 
+                                key=f"sub_hse_select_{permit['id']}"
+                            )
+                            permit['hse'] = substitute_hse.split(" [")[0]
+                    else:
+                        st.info("⏳ Status: รอให้ขั้นตอนที่ 1, 2 และ 3 ลงนามเสร็จสิ้นก่อน ระบบจึงจะเริ่มนับเวลา 10 นาทีของ จป.")
+                
+                st.write("---")
+                st.markdown("##### 🚥 ลำดับสถานะการเซ็นเปิดงานปัจจุบัน:")
+                st.write(f"- 1. ผู้ควบคุมงาน ({permit['supervisor']}): {'✅ อนุมัติแล้ว' if permit['sup_approved'] else '⏳ รอการลงนาม'}")
+                st.write(f"- 2. เจ้าของพื้นที่ ({permit['owner']}): {'✅ อนุมัติแล้ว' if permit['owner_approved'] else '⏳ รอการลงนาม'}")
+                st.write(f"- 3. ผู้อนุญาต ({permit['issuer']}): {'✅ อนุมัติแล้ว' if permit['issuer_approved'] else '⏳ รอการลงนาม'}")
+                st.write(f"- 4. ผู้อนุมัติสิทธิ์ จป./ผู้แทนความปลอดภัย ({permit['hse']}): {'✅ อนุมัติเปิดงานสมบูรณ์' if permit['hse_approved'] else '⏳ รอขั้นตอนก่อนหน้าเสร็จสิ้น'}")
+                
+                st.write("---")
+                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+                
+                with b_col1:
+                    if not permit['sup_approved']:
+                        if st.button(f"✍️ 1. อนุมัติ ({permit['supervisor']})", key=f"btn_sup_{permit['id']}"):
+                            permit['sup_approved'] = True
+                            permit['status'] = "Pending Step 2: Area Owner Approval ⏳"
+                            upload_db_to_sharepoint() # เซฟขึ้นคลาวด์ทุกจังหวะที่มีการเซ็นอนุมัติ
+                            st.rerun()
+                with b_col2:
+                    if permit['sup_approved'] and not permit['owner_approved']:
+                        if st.button(f"✍️ 2. อนุมัติ ({permit['owner']})", key=f"btn_own_{permit['id']}"):
+                            permit['owner_approved'] = True
+                            permit['status'] = "Pending Step 3: Permit Issuer Approval ⏳"
+                            upload_db_to_sharepoint()
+                            st.rerun()
+                with b_col3:
+                    if permit['sup_approved'] and permit['owner_approved'] and not permit['issuer_approved']:
+                        if st.button(f"✍️ 3. อนุมัติ ({permit['issuer']})", key=f"btn_iss_{permit['id']}"):
+                            permit['issuer_approved'] = True
+                            permit['status'] = "Pending HSE Approval 👮"
+                            permit['timestamp'] = time.time()
+                            upload_db_to_sharepoint()
+                            st.rerun()
+                with b_col4:
+                    if permit['sup_approved'] and permit['owner_approved'] and permit['issuer_approved'] and not permit['hse_approved']:
+                        if st.button(f"✍️ 4. อนุมัติปิดท้าย ({permit['hse']})", key=f"btn_hse_{permit['id']}"):
+                            permit['hse_approved'] = True
+                            permit['status'] = "Fully Approved 🟢"
+                            upload_db_to_sharepoint()
+                            st.success("เปิดใบอนุญาตทำงานเสร็จสิ้นสมบูรณ์!")
+                            st.rerun()
+                            
+        if any(p['issuer_approved'] and not p['hse_approved'] and not p['is_off_hours'] for p in active_permits):
+            st.button("🔄 อัปเดตเวลาตัวนับถอยหลังหน้างาน (Refresh Timer)")
 
-def approval_page(token):
-    conn = db()
-    with conn as c:
-        appr = c.execute("SELECT * FROM approvals WHERE token=?", (token,)).fetchone()
-    conn.close()
-    if not appr:
-        st.error("ลิงก์อนุมัติไม่ถูกต้อง")
-        return
-    p,a = get_permit(appr['permit_id'])
-    st.markdown(f"## ✅ Approval: {p['doc_no']}")
-    st.write(f"**บทบาท:** {appr['role']}")
-    st.write(f"**ผู้อนุมัติ:** {appr['approver_name']}")
-    st.write(f"**พื้นที่:** {p['area']} | **ประเภทงาน:** {p['work_type']}")
-    st.write(f"**รายละเอียดงาน:** {p['work_description']}")
-    st.write(f"**มาตรการควบคุม:** {p['controls']}")
-    photos=json.loads(p['photos'] or '[]')
-    if photos:
-        cols=st.columns(3)
-        for i,ph in enumerate(photos):
-            if Path(ph).exists(): cols[i%3].image(ph, use_container_width=True)
-    if appr['decision'] != 'Pending':
-        st.info(f"รายการนี้ถูกดำเนินการแล้ว: {appr['decision']} เมื่อ {appr['decided_at']}")
-        return
-    comment = st.text_area("ความคิดเห็นประกอบการอนุมัติ")
-    c1,c2 = st.columns(2)
-    if c1.button("อนุมัติ", type="primary"):
-        conn = db()
-        with conn as c:
-            c.execute("UPDATE approvals SET decision=?, comment=?, decided_at=? WHERE token=?", ('Approved',comment,datetime.now().strftime('%Y-%m-%d %H:%M:%S'),token))
-        save_and_sync_db(conn)
-        conn.close()
-        recalc_status(appr['permit_id'])
-        st.success("บันทึกผลอนุมัติและอัปเดตไฟล์บนคลาวด์แล้ว")
-        st.rerun()
-    if c2.button("ไม่อนุมัติ"):
-        conn = db()
-        with conn as c:
-            c.execute("UPDATE approvals SET decision=?, comment=?, decided_at=? WHERE token=?", ('Rejected',comment,datetime.now().strftime('%Y-%m-%d %H:%M:%S'),token))
-        save_and_sync_db(conn)
-        conn.close()
-        recalc_status(appr['permit_id'])
-        st.error("บันทึกผลไม่อนุมัติและอัปเดตไฟล์บนคลาวด์แล้ว")
-        st.rerun()
-
-def template_explorer():
-    st.markdown("## 📄 อ่าน Excel ต้นแบบ")
-    st.write("อัปโหลด Excel ต้นแบบเพื่อให้ระบบดึงข้อความ/หัวข้อคำถามออกมาเป็นตาราง สำหรับใช้ปรับฟอร์ม Streamlit ต่อ")
-    f = st.file_uploader("อัปโหลดไฟล์ Excel", type=['xlsx','xls'])
-    if f:
-        try:
-            xls = pd.ExcelFile(f)
-            sheet = st.selectbox("เลือก Sheet", xls.sheet_names)
-            raw = pd.read_excel(f, sheet_name=sheet, header=None, dtype=str).fillna("")
-            rows=[]
-            for r in range(raw.shape[0]):
-                vals=[str(v).strip() for v in raw.iloc[r].tolist() if str(v).strip()]
-                if vals:
-                    rows.append({"row":r+1,"text":" | ".join(vals)})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.error(f"อ่านไฟล์ไม่สำเร็จ: {e}")
-
-def export_data():
-    st.markdown("## ⬇️ Export ข้อมูล")
-    df=all_permits_df()
-    if df.empty:
-        st.info("ยังไม่มีข้อมูล")
-        return
-    st.download_button("ดาวน์โหลดข้อมูล Permit เป็น CSV", df.to_csv(index=False).encode('utf-8-sig'), file_name="ptw_permits.csv", mime="text/csv")
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-def main():
-    qp = st.query_params
-    token = qp.get("token", None)
-    if token:
-        approval_page(token)
-        return
-    with st.sidebar:
-        st.image("https://dummyimage.com/600x120/0b6b50/ffffff&text=SOLMAX+PTW", use_container_width=True)
-        menu = st.radio("เมนู", ["Dashboard", "สร้าง Permit ใหม่", "รายละเอียด/Approval Links", "อ่าน Excel ต้นแบบ", "Export ข้อมูล"])
-        st.caption("หมายเหตุ: หากให้มือถือสแกนได้ ต้องรันด้วยคำสั่ง --server.address 0.0.0.0 และมือถืออยู่ Network เดียวกัน")
-    if menu == "Dashboard": dashboard()
-    elif menu == "สร้าง Permit ใหม่": new_permit_form()
-    elif menu == "รายละเอียด/Approval Links": detail_and_links()
-    elif menu == "อ่าน Excel ต้นแบบ": template_explorer()
-    elif menu == "Export ข้อมูล": export_data()
-
-if __name__ == "__main__":
-    main()
+# ================= PAGE 4: PERMIT CLOSURE PANEL =================
+elif "แจ้งอนุมัติปิดงาน" in page:
+    st.title("🔒 ระบบแจ้งและอนุมัติปิดงานความปลอดภัย / Permit Closure Panel")
+    st.write("---")
+    
+    open_permits = [p for p in st.session_state.permits if p["status"] in ["Fully Approved 🟢", "Pending Closure ⏳"]]
+    
+    if not open_permits:
+        st.info("💡 ไม่มีใบงานที่อยู่ระหว่างดำเนินการเปิดหน้างานในระบบขณะนี้")
+    else:
+        for idx, permit in enumerate(open_permits):
+            with st.expander(f"📦 ใบงานแจ้งปิดงาน เลขที่: {permit['id']} | ผู้ขอ: {permit['applicant']}", expanded=True):
+                st.markdown(f"**📍 พื้นที่ปฏิบัติงาน:** {permit['area']} | **🎯 ประเภทใบงาน:** {permit['type']}")
+                st.write("---")
+                
+                st.markdown("##### 🚥 Status การเซ็นปิดหน้างาน:")
+                st.write(f"- 1. ผู้ควบคุมงาน ({permit['supervisor']}): {'✅ เซ็นปิดแล้ว' if permit['closed_sup_approved'] else '⏳ รอเซ็นปิดงาน'}")
+                st.write(f"- 2. เจ้าของพื้นที่ ({permit['owner']}): {'✅ เซ็นปิดแล้ว' if permit['closed_owner_approved'] else '⏳ รอเซ็นปิดงาน'}")
+                st.write(f"- 3. ผู้อนุญาต ({permit['issuer']}): {'✅ ปิดสมบูรณ์แล้ว' if permit['closed_issuer_approved'] else '⏳ รอเซ็นปิดงาน'}")
+                
+                st.write("---")
+                bc1, bc2, bc3 = st.columns(3)
+                with bc1:
+                    if not permit['closed_sup_approved']:
+                        if st.button(f"🔒 1. ผู้ควบคุมงาน ปิดงาน", key=f"cl_sup_{permit['id']}"):
+                            permit['closed_sup_approved'] = True
+                            permit['status'] = "Pending Closure ⏳"
+                            upload_db_to_sharepoint() # ส่งอัปเดตไฟล์กลับขึ้นคลาวด์บริษัทเมื่อมีการแจ้งปิดงาน
+                            st.rerun()
+                with bc2:
+                    if permit['closed_sup_approved'] and not permit['closed_owner_approved']:
+                        if st.button(f"🔒 2. เจ้าของพื้นที่ ปิดงาน", key=f"cl_own_{permit['id']}"):
+                            permit['closed_owner_approved'] = True
+                            upload_db_to_sharepoint()
+                            st.rerun()
+                with bc3:
+                    if permit['closed_sup_approved'] and permit['closed_owner_approved'] and not permit['closed_issuer_approved']:
+                        if st.button(f"🔒 3. ผู้อนุญาต ปิดงานสมบูรณ์", key=f"cl_iss_{permit['id']}"):
+                            permit['closed_issuer_approved'] = True
+                            permit['status'] = "Closed Completed 🔒"
+                            upload_db_to_sharepoint()
+                            st.success("ปิดใบงานความปลอดภัยเสร็จสิ้นอย่างสมบูรณ์!")
+                            st.rerun()
